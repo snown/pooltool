@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+#NAMESPACE=pooltool
+
+dependencies::register_module "pooltool/pathtools"
+
+# Find the absolute path of an exiting file or directory
+#-------------------------------------------------------------------------------
+function abspath {
+    if [[ -d "$1" ]]
+    then
+        pushd "$1" >/dev/null
+        pwd
+        popd >/dev/null
+    elif [[ -e $1 ]]
+    then
+        pushd "$(dirname "$1")" >/dev/null
+        echo "$(pwd)/$(basename "$1")"
+        popd >/dev/null
+    else
+        echo "$1" does not exist! >&2
+        return 127
+    fi
+}
+
+# Returns true if parameter is a directory and has no content inside, false
+#   otherwise
+#-------------------------------------------------------------------------------
+function is_empty_dir {
+  if [[ -e "$1" ]]; then
+    if [[ -d "$1" ]]; then
+      ! $(ls -1qA "$1" | grep -q .)
+    else
+      false
+    fi
+  else
+    true
+  fi
+}
+
+# Concatenate the arguments with "/" between each
+#-------------------------------------------------------------------------------
+function construct_path {
+  local result="$1"
+  shift
+  
+  while [[ $# -gt 0 ]]; do
+    local segment="$1"
+    
+    if [[ ${#segment} -gt 0 ]]; then
+      result="${result%/}/${segment#/}"
+    fi
+    
+    shift
+  done
+  
+  echo "${result}"
+}
+
+# Walk up the path parameter until the system reports an existing file or
+#   directory
+#-------------------------------------------------------------------------------
+function first_existing_path {
+  local result
+  
+  if [[ -e "$1" ]]; then
+    result="$1"
+  else
+    result="$(this::first_existing_path "$(dirname "$1")")"
+    if [[ -d "${result}" ]]; then
+      result="${result%/}/"
+    fi
+  fi
+  
+  echo "$(this::abspath "${result}")"
+}
+
+# Returns the absolute path of parameter's first existing match then appends
+#   the remainder of the parameter's path
+#-------------------------------------------------------------------------------
+function abs_target {
+  if [[ -e "$1" ]]; then
+    echo "$(this::abspath "$1")"
+  else
+    local path_segment="$(basename "$1")"
+    local parent_dir="$(dirname "$1")"
+    echo "$(this::construct_path "$(this::abs_target "${parent_dir}")" "${path_segment}")"
+  fi
+}
+
+# Return all of the nested files in a path
+#-------------------------------------------------------------------------------
+function files_from_paths {
+  local paths=()
+  local argument
+  for argument in "$@"; do
+    if [[ "$argument" == "declare -a "* ]]; then
+      local array_string="$(echo "${argument}" | sed "s/^[^(]*// ; s/'$//")"
+      local subpaths
+      declare -a subpaths="${array_string}"
+      paths+=( "${subpaths[@]}" )
+    else
+      paths+=( "$argument" )
+    fi
+  done
+  
+  local path
+  local files=()
+  for path in "${paths[@]}"; do
+    if [[ -d "${path}" ]]; then
+      local subfiles_string="$(this::files_from_paths "${path%/}"/*)"
+      local subfiles
+      declare -a subfiles="$(echo "${subfiles_string}" | sed "s/^[^(]*// ; s/'$//")"
+      files+=( "${subfiles[@]}" )
+    elif [[ -f "${path}" ]]; then
+      files+=( "${path}" )
+    fi
+  done
+  
+  echo "$(declare -p files)"
+}

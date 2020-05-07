@@ -1,0 +1,380 @@
+#!/usr/bin/env bash
+#NAMESPACE=snapraid
+
+dependencies::depends "snown/pansi"
+dependencies::depends "snown/here_printf"
+dependencies::register_module "snapraid/devices"
+
+function print_summary {
+  col_indent=${1:-0}
+  local summary="Get information about the disks in the current RAID array"
+  local lines
+  IFS=$'\n' read -d '' -ra lines <<< "$(fold -w $((80 - ${col_indent:-0})) -s <<< "${summary}")"
+  lines[0]="$(bashful trim <<< "${lines[0]}")"
+  if [[ ${#lines[@]} -gt 1 ]]; then
+    local i
+    for (( i = 1; i < ${#lines[@]}; i++ )); do
+      lines[i]="$(bashful trim <<< "${lines[i]}")"
+      lines[i]="$(bashful repeat ${col_indent:-0} printf " ")${lines[i]}"
+    done
+    
+  fi
+  if [[ ${#lines[@]} -gt 1 ]]; then
+    local length=$((${#lines[@]} - 1))
+    printf "%s\n" "${lines[@]:0:${length}}"
+  fi
+  printf "%s" "${lines[@]: -1}"
+}
+
+function print_help {
+  snown::here_printf <<-HELP
+$(this::print_summary)
+
+$(snown::pansi --bold "USAGE:")
+  pooltool devices  [-h|--help]
+  pooltool devices  [-o|--output <list>] [-T|--print-table] [-N|--no-header] 
+                    [-d|--in-declare-format] [-f|--force-reset] [filter...]
+                    
+$(snown::pansi --bold "OPTIONS:")
+  -h, --help              Print this help message.
+  -o, --output <list>     Types of info to output as a comma seperated list.
+                          See $(snown::pansi --bold "OUTPUT TYPES") for list of supported types.
+  -T, --print-table       Print the results as a table to stdout, where the 
+                          columns are the results of the combined filters.
+  -N, --no-header         Do not print the header line when printing a table 
+                          ($(snown::pansi --underline "-T, --print-table"))
+  -d, --in-declare-format Print results in such a way that they could be passed 
+                          to a "declare" statement. For example: 
+                          $(snown::pansi --italic "declare -a my_mountpoints=\$(pooltool devices mountpoints)")
+                          If not set, the command will return each result as an 
+                          individual entry to stdout, seperated by new lines.
+                          Good for piping or the like.
+  -f, --force-reset       Ensure the latest data is being grabbed from the raid.
+
+$(snown::pansi --bold "OUTPUT TYPES:")
+The output type is a comma seperated list of information type you want. With the
+-T option it may make sense to include multiple output types. For example: 
+  If you want to see the RAID's registered names, and where they are mounted.
+  $(snown::pansi --italic "pooltool devices -o \"names,mountpoints\"")
+But often if using this in a script, you will only want to specify one output 
+type, so that the result can be more easily parsed or put into an array. 
+For example:
+  If you want to be able ti iterate over all the partition block devices as an 
+  array.
+  $(snown::pansi --italic "partitions=( \$(pooltool devices -o \"partitions\") )")
+
+
+  names       Returns the names of the devices registered with the RAID. This is
+              how the raid references the device, it does not necessarily 
+              reflect the volume, partition, or mountpoint names.
+  volumes     The disk block devices registered to the RAID. Likely something 
+              like '/dev/sd[a-z]'
+  partitions  The partition block device registered to the RAID. Likely the same
+              as it's volume result but with a partition number at the end, 
+              like '/dev/sd[a-z][1-9]'
+  mountpoints The point int he file system where the drive is mounted. This is 
+              where you would interact with the underlying data drives when the
+              raid is up, and you are not using the pool path.
+  all         Returns information for all device categories. Same as:
+              $(snown::pansi --italic "pooltool devices -o \"names,volumes,partitions,mountpoints\"")
+              is also the default if no output is specified.
+              
+$(snown::pansi --bold "FILTERS:")
+Filters will help match the info returned to the desired device. any number of 
+filters can be specified in any order or combination. The results will be any 
+and all matching devices across all filters.
+
+  -n, --name <raid_name>            Filters the results to include a device with
+                                    a RAID name that matches $(snown::pansi --underline "raid_name") if it 
+                                    exists.
+  -v, --volume <block_disk>         Filters the results to include a device that
+                                    matches the $(snown::pansi --underline "block_disk") specified, if it 
+                                    exists.
+  -p, --partition <block_partition> Filters the results to include a device that
+                                    matches the $(snown::pansi --underline "block_partition") specified, if
+                                    it exists.
+  -m, --mountpoint <mountpoint>     Filters the results to include a device that
+                                    matches the $(snown::pansi --underline "mountpoint") from the filesystem 
+                                    specified, if it exists. This cannot be the 
+                                    RAID pool path.
+HELP
+}
+
+SNAPRAID_NAMES=()
+SNAPRAID_VOLUMES=()
+SNAPRAID_PARTITIONS=()
+function devices {
+  local getNames=false
+  local getVolumes=false
+  local getPartitions=false
+  local getMountpoints=false
+  local find_names=()
+  local find_partitions=()
+  local find_volumes=()
+  local find_mountpoints=()
+  local declareFormatted=false
+  local reset=false
+  local print_table=false
+  local include_table_header=true
+  local sub_get_partition
+  local sub_get_mountpoint=false
+  
+  if [[ $# == 0 ]]; then
+    set -- "-o" "all" "-T"
+  fi
+  
+  while [[ $# -gt 0 ]]; do
+    local _key="$1"
+    case "${_key}" in
+    -o|--output)
+      local types=( $(bashful split_string <<< "$2") )
+      shift
+      for type in "${types[@]}"; do
+        case "${type,,}" in
+        name|names)
+          getNames=true
+          ;;
+        volume|volumes)
+          getVolumes=true
+          ;;
+        partition|partitions)
+          getPartitions=true
+          ;;
+        mountpoint|mountpoints)
+          getMountpoints=true
+          ;;
+        all)
+          getNames=true
+          getVolumes=true
+          getPartitions=true
+          getMountpoints=true
+          ;;
+        esac
+      done
+      ;;
+    -n|--name)
+      find_names+=( "$2" )
+      shift
+      ;;
+    -p|--partition)
+      find_partitions+=( "$2" )
+      shift
+      ;;
+    -v|--volume)
+      find_volumes+=( "$2" )
+      shift
+      ;;
+    -m|--mountpoint)
+      find_mountpoints+=( "$2" )
+      shift
+      ;;
+    -d|--in-declare-format)
+      declareFormatted=true
+      ;;
+    -T|--print-table)
+      print_table=true
+      ;;
+    -N|--no-header)
+      include_table_header=false
+      ;;
+    -f|--force-reset)
+      reset=true
+      ;;
+    -h|--help)
+      this::print_help
+      exit 0
+      ;;
+    esac
+    shift
+  done
+  
+  if [[ "${getNames}" == false && "${getVolumes}" == false && "${getPartitions}" == false && "${getMountpoints}" == false ]]; then
+    getNames=true
+    getVolumes=true
+    getPartitions=true
+    getMountpoints=true
+  fi
+      
+  if [[ "${reset}" == true || "${SNAPRAID_NAMES[@]}" == "" || "${SNAPRAID_VOLUMES[@]}" == "" || "${SNAPRAID_PARTITIONS[@]}" == "" ]]; then
+    SNAPRAID_NAMES=()
+    SNAPRAID_VOLUMES=()
+    SNAPRAID_PARTITIONS=()
+    
+    local snapraid_devices
+    IFS=$'\n' read -d '' -ra snapraid_devices <<< "$( snapraid devices )"
+
+    for device in "${snapraid_devices[@]}"; do
+      SNAPRAID_NAMES+=( "$(awk '{ print $5 }' <<< "${device}")" )
+      SNAPRAID_VOLUMES+=( "$(awk '{ print $2 }' <<< "${device}")" )
+      SNAPRAID_PARTITIONS+=( "$(awk '{ print $4 }' <<< "${device}")" )
+    done
+  fi
+  
+  local snapraid_names=( "${SNAPRAID_NAMES[@]}" )
+  local snapraid_volumes=( "${SNAPRAID_VOLUMES[@]}" )
+  local snapraid_partitions=( "${SNAPRAID_PARTITIONS[@]}" )
+  local snapraid_mountpoints=()
+  if [[ "${getMountpoints}" == true || ${#find_mountpoints[@]} -gt 0 ]]; then
+    local partition
+    for partition in "${snapraid_partitions[@]}"; do
+      snapraid_mountpoints+=( "$(df --output="target" "${partition}" | tail -n 1)" )
+    done
+  fi
+    
+  local found_name_indices=()
+  if [[ ${#find_names[@]} -gt 0 ]]; then
+    local search_name
+    for search_name in "${find_names[@]}"; do
+      if [[ "${search_name}" == "PPU"* ]]; then
+        local parity_num="$(printf '%g' "${search_name#PPU}")"
+        if [[ ${parity_num} -gt 1 ]]; then
+          search_name="${parity_num}-parity"
+        else
+          search_name="parity"
+        fi
+      fi
+      local name_idx
+      for (( name_idx = 0; name_idx < ${#snapraid_names[@]}; name_idx++ )); do
+        local name="${snapraid_names[name_idx]}"
+        if [[ "${name}" == "${search_name}" ]]; then
+          found_name_indices+=( ${name_idx} )
+          break
+        fi
+      done
+    done
+  fi
+    
+  local found_volume_indices=()
+  if [[ ${#find_volumes[@]} -gt 0 ]]; then
+    local search_volume
+    for search_volume in "${find_volumes[@]}"; do
+      local volume_idx
+      for (( volume_idx = 0; volume_idx < ${#snapraid_volumes[@]}; volume_idx++ )); do
+        local volume="${snapraid_volumes[volume_idx]}"
+        if [[ "${volume}" == "${search_volume}" ]]; then
+          found_volume_indices+=( ${volume_idx} )
+          break
+        fi
+      done
+    done
+  fi
+    
+  local found_partition_indices=()
+  if [[ ${#find_partitions[@]} -gt 0 ]]; then
+    local search_partition
+    for search_partition in "${find_partitions[@]}"; do
+      local partition_idx
+      for (( partition_idx = 0; partition_idx < ${#snapraid_partitions[@]}; partition_idx++ )); do
+        local partition="${snapraid_partitions[partition_idx]}"
+        if [[ "${partition}" == "${search_partition}" ]]; then
+          found_partition_indices+=( ${partition_idx} )
+          break
+        fi
+      done
+    done
+  fi
+    
+  local found_mountpoint_indices=()
+  if [[ ${#find_mountpoints[@]} -gt 0 ]]; then
+    local search_mountpoint
+    for search_mountpoint in "${find_mountpoints[@]}"; do
+      local mountpoint_idx
+      for (( mountpoint_idx = 0; mountpoint_idx < ${#snapraid_mountpoints[@]}; mountpoint_idx++ )); do
+        local mountpoint="${snapraid_mountpoints[mountpoint_idx]}"
+        if [[ "${mountpoint}" == "${search_mountpoint}" ]]; then
+          found_mountpoint_indices+=( ${mountpoint_idx} )
+          break
+        fi
+      done
+    done
+  fi
+    
+  local indices=( ${found_name_indices[@]} ${found_volume_indices[@]} ${found_partition_indices[@]} ${found_mountpoint_indices[@]} )
+  if [[ ${#indices[@]} -gt 0 ]]; then
+    local stuff="$(printf '%g\n' ${indices[@]} | sort -un)"
+    IFS=$'\n' read -d '' -ra indices <<< "$(printf '%g\n' ${indices[@]} | sort -un)"
+  else
+    indices=( $(seq 0 $(( ${#snapraid_names[@]} - 1 ))) )
+  fi
+  
+  local idx
+  local names=()
+  local volumes=()
+  local partitions=()
+  local mountpoints=()
+  for idx in ${indices[@]}; do
+    names+=( "${snapraid_names[idx]}" )
+    volumes+=( "${snapraid_volumes[idx]}" )
+    partitions+=( "${snapraid_partitions[idx]}" )
+    if [[ ${#snapraid_mountpoints[@]} -gt 0 ]]; then
+      mountpoints+=( "${snapraid_mountpoints[idx]}" )
+    fi
+  done
+  
+  if [[ "${declareFormatted}" == true ]]; then
+    if [[ "${getNames}" == true ]]; then
+      declare -p names | sed "s/^[^(]*// ; s/'$//"
+    fi
+    if [[ "${getVolumes}" == true ]]; then
+      declare -p volumes | sed "s/^[^(]*// ; s/'$//"
+    fi
+    if [[ "${getPartitions}" == true ]]; then
+      declare -p partitions | sed "s/^[^(]*// ; s/'$//"
+    fi
+    if [[ "${getMountpoints}" == true ]]; then
+      declare -p mountpoints | sed "s/^[^(]*// ; s/'$//"
+    fi
+  elif [[ "${print_table}" == true ]]; then
+    local header_line=()
+    if [[ "${getNames}" == true ]]; then
+      header_line+=( "$(snown::pansi --underline "NAME")" )
+    fi
+    if [[ "${getVolumes}" == true ]]; then
+      header_line+=( "$(snown::pansi --underline "VOLUME")" )
+    fi
+    if [[ "${getPartitions}" == true ]]; then
+      header_line+=( "$(snown::pansi --underline "PART")" )
+    fi
+    if [[ "${getMountpoints}" == true ]]; then
+      header_line+=( "$(snown::pansi --underline "MOUNT")" )
+    fi
+    local table="$(printf "%s\t" "${header_line[@]}")"
+    table="${table%%$'\t'}"
+    
+    local i
+    for (( i = 0; i < ${#indices[@]}; i++ )); do
+      local line=()
+      if [[ "${getNames}" == true ]]; then
+        line+=( "${names[i]}" )
+      fi
+      if [[ "${getVolumes}" == true ]]; then
+        line+=( "${volumes[i]}" )
+      fi
+      if [[ "${getPartitions}" == true ]]; then
+        line+=( "${partitions[i]}" )
+      fi
+      if [[ "${getMountpoints}" == true ]]; then
+        line+=( "${mountpoints[i]}" )
+      fi
+      
+      local string="$(printf "%s\t" "${line[@]}")"
+      string="${string%%$'\t'}"
+      table="${table}$(printf "\n%s" "${string}")"
+    done
+    
+    column -t -s $'\t' <<< "$(bashful trim_lines  <<< "${table}")"
+  else
+    if [[ "${getNames}" == true ]]; then
+      printf "%s\n" "${names[@]}"
+    fi
+    if [[ "${getVolumes}" == true ]]; then
+      printf "%s\n" "${volumes[@]}"
+    fi
+    if [[ "${getPartitions}" == true ]]; then
+      printf "%s\n" "${partitions[@]}"
+    fi
+    if [[ "${getMountpoints}" == true ]]; then
+      printf "%s\n" "${mountpoints[@]}"
+    fi
+  fi
+}

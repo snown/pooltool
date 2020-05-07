@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+#NAMESPACE=pooltool
+
+dependencies::depends "pooltool/pathtools"
+dependencies::register_module "pooltool/raidtools"
+
+# Check if path parameter is a child of the RAID path
+#-------------------------------------------------------------------------------
+function is_raid_path {
+  local path="$(pooltool::first_existing_path "$1")"
+  # path="$(pooltool::abspath "${path}")"
+  
+  [[ "${path}" == "${RAID_LOCATION}"* ]]
+}

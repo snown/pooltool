@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+#NAMESPACE=pooltool::commands
+
+dependencies::depends "pooltool/pathtools"
+dependencies::depends "pooltool/raidtools"
+dependencies::depends "pooltool/commands/find"
+dependencies::depends "pooltool/commands/cp"
+dependencies::depends "snown/pansi"
+dependencies::depends "snown/here_printf"
+dependencies::register_module "pooltool/commands/mv"
+
+function mv::print_summary {
+  local col_indent=${1:-0}
+  local summary="Perform '$(snown::pansi --italic "pooltool cp")' then delete the source file, effectively \"moving\" the file to the destination."
+  local lines
+  IFS=$'\n' read -d '' -ra lines <<< "$(fold -w $((80 - ${col_indent})) -s <<< "${summary}")"
+  lines[0]="$(bashful trim <<< "${lines[0]}")"
+  if [[ ${#lines[@]} -gt 1 ]]; then
+    local i
+    for (( i = 1; i < ${#lines[@]}; i++ )); do
+      lines[i]="$(bashful trim <<< "${lines[i]}")"
+      lines[i]="$(bashful repeat ${col_indent} printf " ")${lines[i]}"
+    done
+    
+  fi
+  if [[ ${#lines[@]} -gt 1 ]]; then
+    local length=$((${#lines[@]} - 1))
+    printf "%s\n" "${lines[@]:0:${length}}"
+  fi
+  printf "%s" "${lines[@]: -1}"
+}
+
+function mv::print_help {
+  snown::here_printf <<-HERE
+$(this::mv::print_summary)
+$(snown::pansi --bold "USAGE:")
+  pooltool mv [-h|--help]
+  pooltool mv <source> <destination>
+$(snown::pansi --bold "FLAGS:")
+  -h, --help    Print this help message.
+$(snown::pansi --bold "ARGUMENTS:")
+  <source>      The file or folder that you would like to be moved into the RAID. 
+                This file can already be in the RAID, or it can be outside.
+                If you are attempting to move a directory (not just it's contents), 
+                ensure that $(snown::pansi --underline "source") does not end in a '/'.
+  <destination> The desired location inside the RAID where you want the $(snown::pansi --underline "source") 
+                to be moved to. Ending the $(snown::pansi --underline "destination") with a '/' will indicate 
+                that you want it to act as a directory in which to place the 
+                $(snown::pansi --underline "source"), where as leaving the '/' off will indicate a new name 
+                for the $(snown::pansi --underline "source") parameter in it's new location.
+HERE
+}
+
+function mv {
+  while [[ $# -gt 0 ]]; do
+    local _key="$1"
+    case "${_key}" in
+    -h|--help)
+      this::mv::print_help
+      exit 0
+      ;;
+    *)
+      if [[ $# -eq 1 ]]; then
+        target="${_key}"
+      else
+        if [[ ! -e "${_key}" ]]; then
+          echo "Source item does not exist: $1"
+          this::mv::print_help
+          exit 1
+        fi
+        sources+=( "$(pooltool::abspath "${_key}")" )
+      fi
+    esac
+    shift
+  done
+  
+  if [[ ${#sources[@]} -lt 1 ]]; then
+    echo "Need at least one source item"
+    this::mv::print_help
+    exit 1
+  fi
+  if [[ -z ${target:+x} ]]; then
+    echo "Need a target destination"
+    this::mv::print_help
+    exit 1
+  fi
+  if ! $(pooltool::is_raid_path "${target}"); then
+    echo "Target destination must be in the RAID: \"${RAID_LOCATION}\""
+    this::mv::print_help
+    exit 1
+  fi
+  
+  pooltool::commands::cp "${sources[@]}" "${target}"
+  local real_sources=( $"$(pooltool::commands::find "${sources[@]}")" )
+  for source in "${real_sources[@]}"; do
+    echo "=> rm -r ${source}"
+    rm -r "${source}"
+  done
+}

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+#NAMESPACE=pooltool
+
+# dependencies::depends "bashful"
+dependencies::register_module "pooltool/ask_question"
+
+# Ask a yes or no question
+#-------------------------------------------------------------------------------
+function question {
+  local default="y/N"
+  local passthrough=()
+  
+  while [[ $# -gt 0 ]]; do
+    local _key="$1"
+    case "${_key}" in
+    -d)
+      if bashful truth "$2"; then
+        default="Y/n"
+      else
+        default="y/N"
+      fi
+      shift
+      ;;
+    *)
+      passthrough+=( "${_key}" )
+      ;;
+    esac
+    shift
+  done
+  
+  local answer="$(bashful input -d "${default}" "${passthrough[@]}")"
+  
+  if [[ "${answer}" == "Y/n" ]]; then
+    answer="y"
+  elif [[ "${answer}" == "y/N" ]]; then
+    answer="n"
+  fi
+  
+  bashful truth "${answer}"
+}

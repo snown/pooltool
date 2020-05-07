@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+#NAMESPACE=snown
+
+dependencies::register_module "snown/pansi"
+
+function pansi {
+  if ! command -v pansi &>/dev/null; then
+    local tmp_pansi="$(test ! -z ${GLOBAL_CACHE_DIR:+x} && echo "${GLOBAL_CACHE_DIR}/pansi" || echo "$(mktemp -t pansi.XXX)")"
+    if [[ ! -f "${tmp_pansi}" ]]; then
+      mkdir -p "$(dirname ${tmp_pansi})"
+      curl -fsSL -o "${tmp_pansi}" "https://raw.githubusercontent.com/snown/pansi/master/pansi"
+    fi
+    source "${tmp_pansi}"
+  fi
+  
+  pansi "$@"
+}

@@ -1,0 +1,459 @@
+#!/usr/bin/env bash
+#NAMESPACE=pooltool::commands
+
+dependencies::depends "snown/script_sudo"
+dependencies::depends "snapraid/devices"
+dependencies::depends "pooltool/ask_question"
+dependencies::depends "snown/pansi"
+dependencies::depends "snown/here_printf"
+dependencies::register_module "pooltool/commands/disk"
+
+
+function disk::print_summary {
+  local col_indent=${1:-0}
+  local summary="Erase and format a drive for use in the RAID array as either a data or parity drive. New drive can be an additional drive, or a replacement drive."
+  local lines
+  IFS=$'\n' read -d '' -ra lines <<< "$(fold -w $((80 - ${col_indent})) -s <<< "${summary}")"
+  lines[0]="$(bashful trim <<< "${lines[0]}")"
+  if [[ ${#lines[@]} -gt 1 ]]; then
+    local i
+    for (( i = 1; i < ${#lines[@]}; i++ )); do
+      lines[i]="$(bashful trim <<< "${lines[i]}")"
+      lines[i]="$(bashful repeat ${col_indent} printf " ")${lines[i]}"
+    done
+    
+  fi
+  if [[ ${#lines[@]} -gt 1 ]]; then
+    local length=$((${#lines[@]} - 1))
+    printf "%s\n" "${lines[@]:0:${length}}"
+  fi
+  printf "%s" "${lines[@]: -1}"
+}
+
+function disk::print_help {
+  snown::here_printf <<-HELP
+Erase and format a drive for use in the RAID array as either a data or parity 
+drive. New drive can be an additional drive, or a replacement drive.
+
+$(snown::pansi --bold "USAGE:")
+  pooltool disk [-h|--help]
+  pooltool disk [-d|--disk <volume_device>] [-l|--label <partition_label>]
+$(snown::pansi --bold "FLAGS:")
+  -h, --help    Print this help message.
+$(snown::pansi --bold "OPTIONS:")
+  -d,--disk   The new disk you want added to the array. Likely looks something 
+              like '/dev/sd[a-z]', where "[a-z]" is the drive letter assigned to 
+              the disk.
+  -l, --label The label of the disk once it's added to the raid. By convention 
+              this should be either "DRU" or "PPU", depending if the drive is 
+              meant to be a data drive or parity respectively, then followed by
+              a two digit incrementing number. For example: "DRU05" or "PPU03"
+HELP
+}
+
+POOLTOOL_PROGMRK_COPY_DATA="disk::5b"
+function disk {
+  local new_disk
+  local part_label
+  local username="$(id -nu)"
+  local uid="$(id -u)"
+  local gid="$(id -g)"
+  local runid="$(uuidgen)"
+  
+  while [[ $# -gt 0 ]]; do
+    local _key="$1"
+    case "${_key}" in
+    --disk|--dest|-d)
+      new_disk="$2"
+      shift
+      ;;
+    --label|--name|-l)
+      part_label="$2"
+      shift
+      ;;
+    -h|--help)
+      this::disk::print_help
+      exit 0
+      ;;
+    esac
+    shift
+  done
+  
+  local snapraid_volumes=( $(snapraid::devices volumes) )
+  local snapraid_mountpoints=( $(snapraid::devices mountpoints) )
+  
+  #
+  # 1.  Ensure we have a new disk to work with
+  #
+  
+  while [[ -z ${new_disk:+x} || ! -b "${new_disk}" ]]; do
+    if [[ -n ${new_disk:+x} && ! -b "${new_disk}" ]]; then
+      echo "\"${new_disk}\" is not a block device. Enter something like '/dev/sd[a-z]'"
+      unset new_disk
+    fi
+    
+    local system_volumes
+    IFS=$'\n' read -d '' -ra system_volumes <<< "$(lsblk -plno "TYPE,NAME" | awk -v u="disk" '$1 == u {print $2}')"
+    
+    local volume_options=()
+    local volume
+    for volume in "${system_volumes}"; do
+      if bashful in_array "${volume}" "${snapraid_volumes[@]}"; then
+        continue
+      fi
+      local vol_mounts
+      IFS=$'\n' read -d '' -ra vol_mounts <<< "$(lsblk -lno "TYPE,MOUNTPOINT" | awk -v u="part" '$1 == u {print $2}' | sed '/^[[:space:]]*$/d')"
+      if bashful in_array "/" "${vol_mounts[@]}"; then
+        continue
+      fi
+      
+      volume_options+=( "${volume}" )
+    done
+    IFS=$'\n' read -d '' -ra volume_options <<< "$(lsblk -plno "TYPE,NAME,SIZE" "${volume_options[@]}" | awk -v u="disk" '$1 == u {print $2"\t"$3}' | sort -k2,2hr -k1,1r | awk '{print $1}' | sed '/^[[:space:]]*$/d')"
+    new_disk="$(bashful input -p "What volume would you like to format?" -d "${volume_options[0]}")"
+  done
+  
+  new_disk="$(realpath -Le "${new_disk}")"
+  new_disk="${new_disk%%[[:digit:]]}"
+  
+  # Check if disk has partitions already and is mounted
+  local diskparts
+  IFS=$'\n' read -d '' -ra diskparts <<< "$( lsblk -lo "TYPE,NAME,MOUNTPOINT" "${new_disk}" | tail -n +2 | awk -v u="part" '$1 == u { print $2":"$3 }' )"
+  
+  if [[ ${#diskparts[@]} -gt 0 ]]; then
+    local report="Specified volume has existing partitions"
+    
+    local mountpoints=()
+    # local mounted_partitions=()
+    for diskpart in "${diskparts[@]}"; do
+      if [[ "${diskpart#*:}" != "" ]]; then
+        # mounted_partitions+=( "${diskpart%%:*}" )
+        mountpoints+=( "${diskpart#*:}" )
+      fi
+    done
+    
+    if [[ ${#mountpoints[@]} -gt 0 ]]; then
+      report+=", and is mounted at these locations:"
+    fi
+    
+    bashful warn "${report}"
+    for mountpoint in "${mountpoints[@]}"; do
+      bashful info " ${mountpoint}"
+    done
+    
+    echo "Continuing will erase all data on the volume."
+    local answer="$(bashful input -d "y/N" -p "Are you sure you want to continue?")"
+    if [ "${answer}" == "y/N" ] || ! bashful truth "${answer}"; then
+      exit 0
+    fi
+    
+    # Unmount if needed
+    if [[ ${#mountpoints[@]} -gt 0 ]]; then
+      snown::sudo umount "${mountpoints[@]}"
+    fi
+    
+    snown::sudo sgdisk -Z "${new_disk}"
+  fi
+  
+  #
+  # 2.  Gather info about existing drives in the raid
+  #
+  
+  local snapraid_names=( $(snapraid::devices names) )
+  local snapraid_partitions=( $(snapraid::devices partitions) )
+  
+  local drive_names=()
+  local mountpoint
+  for mountpoint in "${snapraid_mountpoints[@]}"; do
+    drive_names+=( "$(basename "${mountpoint}")" )
+  done
+  
+  #
+  # 3.  Ensure we have a name for this new drive, and see if it's replacing an
+  #     old drive
+  #
+       
+  local is_drive_replacement=false
+  if [[ -z ${part_label:+x} ]]; then
+    if pooltool::question -p "Are you replacing a drive?" -d y ; then
+      is_drive_replacement=true
+    fi
+  fi
+  
+  local proceed=true
+  if [[ -z ${part_label:+x} ]]; then
+    proceed=false
+  elif [ "${is_drive_replacement}" == false ] && bashful in_array "${part_label}" "${drive_names[@]}"; then
+    proceed=false
+  fi
+  
+  while [[ "${proceed}" == false ]]; do
+    echo "${BASH_SOURCE[0]}[${LINENO}]: proceed=${proceed}, part_label=${part_label}, is_drive_replacement=${is_drive_replacement}"
+    if [[ "${is_drive_replacement}" == true ]]; then
+      part_label="$(this::disk::choose_drive_replacing)"
+      proceed=true
+    elif [[ -z ${part_label:+x} ]]; then
+      local suggestion
+      local i=1
+      while [[ -z ${suggestion:+x} ]]; do
+        suggestion="$(printf 'DRU%02g' ${i})"
+        if ! bashful in_array "${suggestion}" "${drive_names[@]}" ; then
+          break
+        fi
+        
+        unset suggestion
+        ((i++))
+      done
+      
+      part_label="$(bashful input -p "What would you like the new drive to be named?" -d "${suggestion}" )"
+    elif bashful in_array "${part_label}" "${drive_names[@]}" ; then
+      if pooltool::question -p "${part_label} is already the name of a drive in the RAID, would you like to replace that drive?" -d n; then
+        is_drive_replacement=true
+        proceed=true
+      else
+        unset part_label
+      fi
+    else
+      proceed=true
+    fi
+  done
+    
+  if [[ -z ${part_label:+x} ]]; then
+    bashful error "We need a label for the partition."
+    this::disk::print_help
+    exit ${ERROR_BAD_USER}
+  fi
+  
+  #
+  # 4.  Create the Partition and filesystem
+  #
+  
+  snown::sudo sgdisk -n 0:0:0 -c 0:"${part_label}" -t 0:8300 "${new_disk}"
+  # snown::sudo mke2fs -t ext4 -L "${part_label}" "${new_disk}1"
+  
+  #
+  # 5.  Copy data if drive is a replacement
+  #
+  
+  if [[ "${is_drive_replacement}" == true ]]; then
+    # 5a. Mount in temporary spot under current user
+    
+    local temp_mountpoint="/media/${username}/${runid}"
+    snown::sudo mkdir -p "${temp_mountpoint}"
+    snown::sudo mount -t ext4 "${new_disk}1" "${temp_mountpoint}"
+    snown::sudo chown "${username}" "${temp_mountpoint}"
+  
+    # 5b. Transfer data
+    
+    this::disk::mail --install
+    
+    local progress_mark="${POOLTOOL_PROGMRK_COPY_DATA}"
+    declare -p runid username uid gid new_disk part_label is_drive_replacement progress_mark > "${HOME}"/.pooltool."${runid}"
+    
+    # screen -dmS "${runid}" bash -c 'rsync -haxHAWXS --numeric-ids --info=progress2 '"$(snapraid::devices get-mountpoint-for "${part_label}")/ ""${temp_mountpoint}/"' ; '"${BASH_SOURCE[0]}"' disk send-message -k "done" --runid '"${runid}"
+    snown::sudo screen -dmS "${runid}" bash -c 'rsync -haxHAWXS --numeric-ids --info=progress2 '"$(snapraid::devices mountpoints -p "${part_label}")/"' '"${temp_mountpoint}/"
+  
+    # 5c. Change old partition name  
+  fi
+  
+  #
+  # 6.  Relaunch RAID with new drive in place
+  #
+  
+  # 6a. Shutdown services relying on pool
+  
+  # 6b. Unmount pool, new, and old drives, then remount with new drive in place
+  
+  # 6c. Perform snapraid checks
+  
+  # 6d. Spin up dependant services
+  
+  # 6e. Snapraid sync
+  
+  
+  
+  exit 0
+}
+
+function disk::reconfigure {
+  while [[ $# -gt 0 ]]; do
+    local _key="$1"
+    case "${_key}" in
+    --runid)
+      if [[ -r "${HOME}/.pooltool.${2}" ]]; then
+        source "${HOME}/.pooltool.${2}"
+      fi
+      if [[ "${runid}" != "$2" ]]; then
+        echo "Could not find correct progress file for id \"${2}\""
+        exit 1
+      fi
+      shift
+      ;;
+    esac
+    shift
+  done
+  
+  local snapraid_names=( $(snapraid::devices names) )
+  local snapraid_partitions=( $(snapraid::devices partitions) )
+  local snapraid_volumes=( $(snapraid::devices volumes) )
+  
+  if [[ "${is_drive_replacement}" == true ]]; then
+    for (( i = 0; i < "${#snapraid_names[@]}"; i++ )); do
+      local raidName="${snapraid_names[i]}"
+      local raid
+    done
+  fi
+}
+
+function disk::send_message {
+  local runid
+  local message_key
+  
+  while [[ $# -gt 0 ]]; do
+    local _key="$1"
+    case "${_key}" in
+    --runid)
+      if [[ -r "${HOME}/.pooltool.${2}" ]]; then
+        source "${HOME}/.pooltool.${2}"
+      fi
+      if [[ "${runid}" != "$2" ]]; then
+        echo "Could not find correct progress file for id \"${2}\""
+        exit 1
+      fi
+      shift
+      ;;
+    -k|--key)
+      message_key="$2"
+      shift
+      ;;
+    esac
+    shift
+  done
+  
+  if [[ "${progress_mark}" == "${POOLTOOL_PROGMRK_COPY_DATA}" ]]; then
+    if [[ "${message_key}" == "done" ]]; then
+      local message
+      read -r -d '' message <<-MESSAGE
+Done copying data from $(snapraid::devices sub_get_mountpoint "${part_label}") to replacement.
+
+You can resume with the next steps by typing:
+${POOLTOOL_INVOKE} resume "${runid}"
+MESSAGE
+      
+      local pooltool_script="$(get_script_path)"
+      this::disk::mail -s "$(basename "${pooltool_script}") Disk Clone is Done" "${username}" <<< "${message}"
+      write "${username}" <<< "${message}"
+    fi
+  fi
+}
+
+# function pooltool::command::disk::status {
+# }
+
+function disk::resume {
+  while [[ $# -gt 0 ]]; do
+    local _key="$1"
+    case "${_key}" in
+    --runid)
+      if [[ -r "${HOME}/.pooltool.${2}" ]]; then
+        source "${HOME}/.pooltool.${2}"
+      fi
+      if [[ "${runid}" != "$2" ]]; then
+        echo "Could not find correct progress file for id \"${2}\""
+        exit 1
+      fi
+      shift
+      ;;
+    esac
+    shift
+  done
+  
+  case "${progress_mark}" in
+  "${POOLTOOL_PROGMRK_COPY_DATA}")
+    if screen -ls "${runid}" &> /dev/null; then
+      echo "Data is still being copied"
+      this::disk::status --runid "${runid}"
+      return 0
+    # else
+      
+    fi
+    ;;
+  esac
+  
+  # if [[ "${progress_mark}" == "${POOLTOOL_PROGMRK_COPY_DATA}" ]]; then
+  #   #statements
+  # fi
+}
+
+function disk::choose_drive_replacing {
+  local part_label
+  local show_detail=false
+  
+  local snapraid_names=( $(snapraid::devices names) )
+  local snapraid_partitions=( $(snapraid::devices partitions) )
+  
+  while [[ -z ${part_label:+x} ]]; do
+    local chosen=""
+    
+    if [[ "${show_detail}" == false ]]; then
+      chosen="$(bashful choice -p "Which drive would you like to replace?" "${snapraid_names[@]}" "More info...")"
+    else
+      local detailed_choices=()
+      for (( i = 0; i < ${#snapraid_names[@]}; i++ )); do
+        local choice="${snapraid_names[i]}"
+        choice+="$(df -H --output="avail,size" "${snapraid_partitions[i]}" | tail -n 1 | awk '{ print " ("$1,"available of",$2")" }')"
+        detailed_choices+=( "${choice}" )
+      done
+      chosen="$(bashful choice -p "Which drive would you like to replace?" "${detailed_choices[@]}")"
+    fi
+    
+    if [[ "${chosen}" == "More info..." ]]; then
+      show_detail=true
+      continue
+    fi
+    
+    chosen="${chosen%% *}"
+    if [[ "${chosen#*-}" == "parity" ]]; then
+      local paritynum="${chosen%%-*}"
+      if [[ "${paritynum}" == "parity" ]]; then
+        paritynum=1
+      fi
+      paritynum="$(printf '%02g' "${paritynum}")"
+      part_label="PPU${paritynum}"
+    else
+      part_label="${chosen}"
+    fi
+  done
+  
+  echo "${part_label}"
+}
+
+# Ensure mail is installed before using
+#-------------------------------------------------------------------------------
+function disk::mail {
+  local installation_only=false
+  local arguments=()
+  
+  while [[ $# -gt 0 ]]; do
+    local _key="$1"
+    case "${_key}" in
+    --install)
+      installation_only=true
+      ;;
+    *)
+      arguments+=( "${_key}" )
+      ;;
+    esac
+    shift
+  done
+  
+  if ! command -v mail &>/dev/null; then
+    debconf-set-selections <<< "postfix postfix/mailname string localhost"
+    debconf-set-selections <<< "postfix postfix/main_mailer_type string 'Local only'"
+    snown::sudo apt-get -y install mailutils
+  fi
+  
+  if [[ "${installation_only}" == false ]]; then
+    mail "${arguments[@]}"
+  fi
+}

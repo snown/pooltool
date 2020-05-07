@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+#NAMESPACE=snown
+
+dependencies::register_module "snown/here_printf"
+
+function here_printf {
+  local format=${1:-"%b\n"}
+  local text
+  read -r -d '' text
+  
+  printf "${format}" "${text}"
+}
