@@ -141,7 +141,13 @@ function cp {
         if [[ "${source}" != *"/" ]]; then
           src_basename="$(basename "${source}")"
         fi
-        destinations+=( "$(pooltool::construct_path "${dru_prefix}" "${raid_dest#${RAID_LOCATION}}" "${src_basename}" "${rel_file}")" )
+        
+        local destination="$(pooltool::construct_path "${dru_prefix}" "${raid_dest#${RAID_LOCATION}}")"
+        if [[ -d "${source}" || ${#sources[@]} -gt 1 || ${#files[@]} -gt 1 || -d "${raid_dest}" || "${raid_dest}" == *"/" ]]; then
+          destination="$(pooltool::construct_path "${destination}" "${src_basename}" "${rel_file}")"
+        fi
+        
+        destinations+=( "${destination}" )
       done
 
       # Hardlink cp

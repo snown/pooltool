@@ -229,7 +229,7 @@ function disk {
   #
   
   snown::sudo sgdisk -n 0:0:0 -c 0:"${part_label}" -t 0:8300 "${new_disk}"
-  # snown::sudo mke2fs -t ext4 -L "${part_label}" "${new_disk}1"
+  #snown::sudo mke2fs -t ext4 -L "${part_label}" "${new_disk}1"
   
   #
   # 5.  Copy data if drive is a replacement
@@ -254,6 +254,9 @@ function disk {
     snown::sudo screen -dmS "${runid}" bash -c 'rsync -haxHAWXS --numeric-ids --info=progress2 '"$(snapraid::devices mountpoints -p "${part_label}")/"' '"${temp_mountpoint}/"
   
     # 5c. Change old partition name  
+  else
+    # TODO: This will likely have to change as we flesh out the replacement process.
+    snown::sudo mke2fs -t ext4 -L "${part_label}" "${new_disk}1"
   fi
   
   #

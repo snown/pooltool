@@ -43,6 +43,7 @@ HELP
 }
 
 function find {
+  local result=()
   local paths=()
   
   while [[ $# -gt 0 ]]; do
@@ -69,6 +70,8 @@ function find {
       fi
     done
     
-    echo "${path}"
+    result+=( "${path}" )
   done
+  
+  echo "${result}"
 }
