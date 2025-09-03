@@ -2,55 +2,20 @@
 #NAMESPACE=pooltool::commands
 
 dependencies::depends "pooltool/pathtools"
-dependencies::depends "snown/pansi"
-dependencies::depends "snown/here_printf"
 dependencies::register_module "pooltool/commands/find"
 
-function find::print_summary {
-  local col_indent=${1:-0}
-  local summary="Locate a file from the RAID pool on one of the RAID data drives."
-  local lines
-  IFS=$'\n' read -d '' -ra lines <<< "$(fold -w $((80 - ${col_indent})) -s <<< "${summary}")"
-  lines[0]="$(bashful trim <<< "${lines[0]}")"
-  if [[ ${#lines[@]} -gt 1 ]]; then
-    local i
-    for (( i = 1; i < ${#lines[@]}; i++ )); do
-      lines[i]="$(bashful trim <<< "${lines[i]}")"
-      lines[i]="$(bashful repeat ${col_indent} printf " ")${lines[i]}"
-    done
-    
-  fi
-  if [[ ${#lines[@]} -gt 1 ]]; then
-    local length=$((${#lines[@]} - 1))
-    printf "%s\n" "${lines[@]:0:${length}}"
-  fi
-  printf "%s" "${lines[@]: -1}"
-}
-
-function find::print_help {
-  snown::here_printf <<-HELP
-$(this::find::print_summary)
-
-$(snown::pansi --bold "USAGE:")
-  pooltool find [-h|--help]
-  pooltool find <file>...
-$(snown::pansi --bold "FLAGS:")
-  -h, --help    Print this help message.
-$(snown::pansi --bold "ARGUMENTS:")
-  <file>  The file from the raid pool that you would like to locate in the raid 
-          data disks.
-HELP
+function print_help {
+  echo "Find your OWN help"
 }
 
 function find {
-  local result=()
   local paths=()
   
   while [[ $# -gt 0 ]]; do
     local _key="$1"
     case "${_key}" in
     -h|--help)
-      this::find::print_help
+      this::print_help
       break
       ;;
     *)
@@ -70,8 +35,6 @@ function find {
       fi
     done
     
-    result+=( "${path}" )
+    echo "${path}"
   done
-  
-  echo "${result}"
 }

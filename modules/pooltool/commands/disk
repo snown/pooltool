@@ -4,52 +4,7 @@
 dependencies::depends "snown/script_sudo"
 dependencies::depends "snapraid/devices"
 dependencies::depends "pooltool/ask_question"
-dependencies::depends "snown/pansi"
-dependencies::depends "snown/here_printf"
 dependencies::register_module "pooltool/commands/disk"
-
-
-function disk::print_summary {
-  local col_indent=${1:-0}
-  local summary="Erase and format a drive for use in the RAID array as either a data or parity drive. New drive can be an additional drive, or a replacement drive."
-  local lines
-  IFS=$'\n' read -d '' -ra lines <<< "$(fold -w $((80 - ${col_indent})) -s <<< "${summary}")"
-  lines[0]="$(bashful trim <<< "${lines[0]}")"
-  if [[ ${#lines[@]} -gt 1 ]]; then
-    local i
-    for (( i = 1; i < ${#lines[@]}; i++ )); do
-      lines[i]="$(bashful trim <<< "${lines[i]}")"
-      lines[i]="$(bashful repeat ${col_indent} printf " ")${lines[i]}"
-    done
-    
-  fi
-  if [[ ${#lines[@]} -gt 1 ]]; then
-    local length=$((${#lines[@]} - 1))
-    printf "%s\n" "${lines[@]:0:${length}}"
-  fi
-  printf "%s" "${lines[@]: -1}"
-}
-
-function disk::print_help {
-  snown::here_printf <<-HELP
-Erase and format a drive for use in the RAID array as either a data or parity 
-drive. New drive can be an additional drive, or a replacement drive.
-
-$(snown::pansi --bold "USAGE:")
-  pooltool disk [-h|--help]
-  pooltool disk [-d|--disk <volume_device>] [-l|--label <partition_label>]
-$(snown::pansi --bold "FLAGS:")
-  -h, --help    Print this help message.
-$(snown::pansi --bold "OPTIONS:")
-  -d,--disk   The new disk you want added to the array. Likely looks something 
-              like '/dev/sd[a-z]', where "[a-z]" is the drive letter assigned to 
-              the disk.
-  -l, --label The label of the disk once it's added to the raid. By convention 
-              this should be either "DRU" or "PPU", depending if the drive is 
-              meant to be a data drive or parity respectively, then followed by
-              a two digit incrementing number. For example: "DRU05" or "PPU03"
-HELP
-}
 
 POOLTOOL_PROGMRK_COPY_DATA="disk::5b"
 function disk {
@@ -72,7 +27,7 @@ function disk {
       shift
       ;;
     -h|--help)
-      this::disk::print_help
+      this::print_help
       exit 0
       ;;
     esac
@@ -220,7 +175,7 @@ function disk {
     
   if [[ -z ${part_label:+x} ]]; then
     bashful error "We need a label for the partition."
-    this::disk::print_help
+    this::print_help
     exit ${ERROR_BAD_USER}
   fi
   
@@ -229,7 +184,7 @@ function disk {
   #
   
   snown::sudo sgdisk -n 0:0:0 -c 0:"${part_label}" -t 0:8300 "${new_disk}"
-  #snown::sudo mke2fs -t ext4 -L "${part_label}" "${new_disk}1"
+  # snown::sudo mke2fs -t ext4 -L "${part_label}" "${new_disk}1"
   
   #
   # 5.  Copy data if drive is a replacement
@@ -254,9 +209,6 @@ function disk {
     snown::sudo screen -dmS "${runid}" bash -c 'rsync -haxHAWXS --numeric-ids --info=progress2 '"$(snapraid::devices mountpoints -p "${part_label}")/"' '"${temp_mountpoint}/"
   
     # 5c. Change old partition name  
-  else
-    # TODO: This will likely have to change as we flesh out the replacement process.
-    snown::sudo mke2fs -t ext4 -L "${part_label}" "${new_disk}1"
   fi
   
   #

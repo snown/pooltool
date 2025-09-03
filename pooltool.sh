@@ -16,6 +16,10 @@ bootstrap_load_module pooltool/commands/find
 bootstrap_load_module pooltool/commands/cp
 bootstrap_load_module pooltool/commands/mv
 bootstrap_load_module pooltool/commands/disk
+bootstrap_load_module pooltool/commands/blink
+bootstrap_load_module pooltool/commands/drivemap
+bootstrap_load_module pooltool/driveutils
+bootstrap_load_module pooltool/drivevisualizer
 bootstrap_load_module snapraid/devices
 bootstrap_load_module snown/pansi
 bootstrap_load_module snown/here_printf
@@ -34,6 +38,8 @@ $(snown::pansi --bold "COMMANDS:")
   cp      $(pooltool::commands::cp::print_summary 10)
   mv      $(pooltool::commands::mv::print_summary 10)
   disk    $(pooltool::commands::disk::print_summary 10) 
+  blink   Blink drive LEDs with visual layout for drive identification
+  drivemap Visual drive bay layout without LED blinking for reference
   devices $(snapraid::print_summary 10)
 HELP
 }
@@ -95,12 +101,34 @@ function main {
       exit 1
     fi
     ;;
+  blink)
+    if command -v pooltool::commands::blink &>/dev/null; then
+      shift
+      pooltool::commands::blink "$@"
+    else
+      echo "'$1' command not currently supported"
+      print_help
+      exit 1
+    fi
+    ;;
+  drivemap)
+    if command -v pooltool::commands::drivemap &>/dev/null; then
+      shift
+      pooltool::commands::drivemap "$@"
+    else
+      echo "'$1' command not currently supported"
+      print_help
+      exit 1
+    fi
+    ;;
   -h|--help)
     local subcommands=(
     find
     cp
     mv
     disk
+    blink
+    drivemap
     )
     if bashful in_array "$2" "${subcommands[@]}"; then
       pooltool::commands::$2 -h
@@ -110,6 +138,91 @@ function main {
       print_help
       exit 0
     fi
+    ;;
+  # Test commands for development
+  test-drives)
+  drivemap)
+    if command -v pooltool::commands::drivemap &>/dev/null; then
+      shift
+      pooltool::commands::drivemap "$@"
+    else
+      echo "'$1' command not currently supported"
+      print_help
+      exit 1
+    fi
+    ;;
+  blink)
+    if command -v pooltool::commands::blink &>/dev/null; then
+      shift
+      pooltool::commands::blink "$@"
+    else
+      echo "'$1' command not currently supported"
+      print_help
+      exit 1
+    fi
+    ;;
+  test-drives)
+    echo "Testing drive utilities module..."
+    
+    echo "Getting arcconf devices..."
+    pooltool::get_arcconf_devices 1
+    
+    echo -e "\nGetting snapraid devices..."
+    pooltool::get_snapraid_devices
+    
+    echo -e "\nCreating unified mapping..."
+    pooltool::create_unified_mapping 1
+    
+    echo -e "\nGetting physical layout..."
+    unified_data=$(pooltool::create_unified_mapping 1 2>/dev/null)
+    if [[ -n "$unified_data" ]]; then
+      mapfile -t unified_array <<< "$unified_data"
+      pooltool::get_physical_layout "${unified_array[@]}"
+    else
+      echo "No unified data available"
+    fi
+    ;;
+  test-visual)
+    echo "Testing drive visualizer module..."
+    pooltool::debug_visualization "${@:2}"
+    ;;
+  test-grid)
+    echo "Testing different grid label types..."
+    controller="${2:-1}"
+    echo "Testing with controller $controller..."
+    
+    # Get unified device data
+    unified_data=$(pooltool::create_unified_mapping "$controller")
+    if [[ -n "$unified_data" ]]; then
+      mapfile -t unified_array <<< "$unified_data"
+      
+      echo -e "\n=== Mount Name Labels ==="
+      pooltool::render_drive_grid "PHYSICAL_LAYOUT" "mount" "" true "${unified_array[@]}"
+      
+      echo -e "\n=== Device Path Labels ==="
+      pooltool::render_drive_grid "PHYSICAL_LAYOUT" "device" "" true "${unified_array[@]}"
+      
+      echo -e "\n=== Arcconf Position Labels ==="
+      pooltool::render_drive_grid "PHYSICAL_LAYOUT" "arcconf" "" true "${unified_array[@]}"
+      
+      echo -e "\n=== SnapRAID Name Labels ==="
+      pooltool::render_drive_grid "PHYSICAL_LAYOUT" "snapraid" "" true "${unified_array[@]}"
+    else
+      echo "No unified data available"
+    fi
+    ;;
+  test-debug)
+    echo "Testing dimension calculations..."
+    controller="${2:-1}"
+    label_type="${3:-mount}"
+    echo "Testing with controller $controller and label type $label_type..."
+    
+    # Call debug function with correct parameter order: controller, label_type, use_colors
+    pooltool::debug_visualization "$controller" "$label_type" true
+    ;;
+  -h|--help)
+    print_help
+    exit 0
     ;;
   *)
     echo "Invalid command: $1"

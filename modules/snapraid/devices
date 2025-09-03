@@ -2,103 +2,7 @@
 #NAMESPACE=snapraid
 
 dependencies::depends "snown/pansi"
-dependencies::depends "snown/here_printf"
 dependencies::register_module "snapraid/devices"
-
-function print_summary {
-  col_indent=${1:-0}
-  local summary="Get information about the disks in the current RAID array"
-  local lines
-  IFS=$'\n' read -d '' -ra lines <<< "$(fold -w $((80 - ${col_indent:-0})) -s <<< "${summary}")"
-  lines[0]="$(bashful trim <<< "${lines[0]}")"
-  if [[ ${#lines[@]} -gt 1 ]]; then
-    local i
-    for (( i = 1; i < ${#lines[@]}; i++ )); do
-      lines[i]="$(bashful trim <<< "${lines[i]}")"
-      lines[i]="$(bashful repeat ${col_indent:-0} printf " ")${lines[i]}"
-    done
-    
-  fi
-  if [[ ${#lines[@]} -gt 1 ]]; then
-    local length=$((${#lines[@]} - 1))
-    printf "%s\n" "${lines[@]:0:${length}}"
-  fi
-  printf "%s" "${lines[@]: -1}"
-}
-
-function print_help {
-  snown::here_printf <<-HELP
-$(this::print_summary)
-
-$(snown::pansi --bold "USAGE:")
-  pooltool devices  [-h|--help]
-  pooltool devices  [-o|--output <list>] [-T|--print-table] [-N|--no-header] 
-                    [-d|--in-declare-format] [-f|--force-reset] [filter...]
-                    
-$(snown::pansi --bold "OPTIONS:")
-  -h, --help              Print this help message.
-  -o, --output <list>     Types of info to output as a comma seperated list.
-                          See $(snown::pansi --bold "OUTPUT TYPES") for list of supported types.
-  -T, --print-table       Print the results as a table to stdout, where the 
-                          columns are the results of the combined filters.
-  -N, --no-header         Do not print the header line when printing a table 
-                          ($(snown::pansi --underline "-T, --print-table"))
-  -d, --in-declare-format Print results in such a way that they could be passed 
-                          to a "declare" statement. For example: 
-                          $(snown::pansi --italic "declare -a my_mountpoints=\$(pooltool devices mountpoints)")
-                          If not set, the command will return each result as an 
-                          individual entry to stdout, seperated by new lines.
-                          Good for piping or the like.
-  -f, --force-reset       Ensure the latest data is being grabbed from the raid.
-
-$(snown::pansi --bold "OUTPUT TYPES:")
-The output type is a comma seperated list of information type you want. With the
--T option it may make sense to include multiple output types. For example: 
-  If you want to see the RAID's registered names, and where they are mounted.
-  $(snown::pansi --italic "pooltool devices -o \"names,mountpoints\"")
-But often if using this in a script, you will only want to specify one output 
-type, so that the result can be more easily parsed or put into an array. 
-For example:
-  If you want to be able ti iterate over all the partition block devices as an 
-  array.
-  $(snown::pansi --italic "partitions=( \$(pooltool devices -o \"partitions\") )")
-
-
-  names       Returns the names of the devices registered with the RAID. This is
-              how the raid references the device, it does not necessarily 
-              reflect the volume, partition, or mountpoint names.
-  volumes     The disk block devices registered to the RAID. Likely something 
-              like '/dev/sd[a-z]'
-  partitions  The partition block device registered to the RAID. Likely the same
-              as it's volume result but with a partition number at the end, 
-              like '/dev/sd[a-z][1-9]'
-  mountpoints The point int he file system where the drive is mounted. This is 
-              where you would interact with the underlying data drives when the
-              raid is up, and you are not using the pool path.
-  all         Returns information for all device categories. Same as:
-              $(snown::pansi --italic "pooltool devices -o \"names,volumes,partitions,mountpoints\"")
-              is also the default if no output is specified.
-              
-$(snown::pansi --bold "FILTERS:")
-Filters will help match the info returned to the desired device. any number of 
-filters can be specified in any order or combination. The results will be any 
-and all matching devices across all filters.
-
-  -n, --name <raid_name>            Filters the results to include a device with
-                                    a RAID name that matches $(snown::pansi --underline "raid_name") if it 
-                                    exists.
-  -v, --volume <block_disk>         Filters the results to include a device that
-                                    matches the $(snown::pansi --underline "block_disk") specified, if it 
-                                    exists.
-  -p, --partition <block_partition> Filters the results to include a device that
-                                    matches the $(snown::pansi --underline "block_partition") specified, if
-                                    it exists.
-  -m, --mountpoint <mountpoint>     Filters the results to include a device that
-                                    matches the $(snown::pansi --underline "mountpoint") from the filesystem 
-                                    specified, if it exists. This cannot be the 
-                                    RAID pool path.
-HELP
-}
 
 SNAPRAID_NAMES=()
 SNAPRAID_VOLUMES=()
@@ -120,38 +24,37 @@ function devices {
   local sub_get_mountpoint=false
   
   if [[ $# == 0 ]]; then
-    set -- "-o" "all" "-T"
+    set -- all -T
   fi
+  
+  case "$1" in
+  names)
+    getNames=true
+    ;;
+  volumes)
+    getVolumes=true
+    ;;
+  partitions)
+    getPartitions=true
+    ;;
+  mountpoints)
+    getMountpoints=true
+    ;;
+  all)
+    getNames=true
+    getVolumes=true
+    getPartitions=true
+    getMountpoints=true
+    ;;
+  *)
+    echo "Unrecognized command: \"$1\"" >2
+    return 1
+  esac
+  shift
   
   while [[ $# -gt 0 ]]; do
     local _key="$1"
     case "${_key}" in
-    -o|--output)
-      local types=( $(bashful split_string <<< "$2") )
-      shift
-      for type in "${types[@]}"; do
-        case "${type,,}" in
-        name|names)
-          getNames=true
-          ;;
-        volume|volumes)
-          getVolumes=true
-          ;;
-        partition|partitions)
-          getPartitions=true
-          ;;
-        mountpoint|mountpoints)
-          getMountpoints=true
-          ;;
-        all)
-          getNames=true
-          getVolumes=true
-          getPartitions=true
-          getMountpoints=true
-          ;;
-        esac
-      done
-      ;;
     -n|--name)
       find_names+=( "$2" )
       shift
@@ -180,20 +83,9 @@ function devices {
     -f|--force-reset)
       reset=true
       ;;
-    -h|--help)
-      this::print_help
-      exit 0
-      ;;
     esac
     shift
   done
-  
-  if [[ "${getNames}" == false && "${getVolumes}" == false && "${getPartitions}" == false && "${getMountpoints}" == false ]]; then
-    getNames=true
-    getVolumes=true
-    getPartitions=true
-    getMountpoints=true
-  fi
       
   if [[ "${reset}" == true || "${SNAPRAID_NAMES[@]}" == "" || "${SNAPRAID_VOLUMES[@]}" == "" || "${SNAPRAID_PARTITIONS[@]}" == "" ]]; then
     SNAPRAID_NAMES=()
