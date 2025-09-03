@@ -1452,14 +1452,71 @@ The addition of background processing, state persistence, and email notification
 
 ---
 
-**Status**: 📋 **ENHANCED PLANNING COMPLETE - READY FOR REVIEW**
+**Status**: ✅ **PHASE 2 COMPLETE - PHASE 3 DECISION MADE**
 
-**Next Step**: Review the multi-modal approach and prioritize which mode to implement first
+**🎯 PHASE 3 IMPLEMENTATION DECISION: CLI/Script Mode Enhancement**
+*Decision Date: September 3, 2025*
 
-**Key Decision Points**:
-1. Which interaction mode provides the most immediate value?
-2. How should we handle the transition from current single-mode commands?
-3. What level of automation and background processing should we start with?
-4. How sophisticated should the notification system be initially?
+**Selected Path**: Option B - CLI/Script Mode Enhancement  
+**Rationale**: 
+- Immediate value for automation and integration
+- Foundation for advanced features while maintaining low risk
+- Builds on proven Phase 2 functionality
+- Most practical need for existing users
+
+**Phase 3.1 Goals**:
+1. Add automation-friendly flags (--quiet, --verbose, --json)
+2. Implement meaningful exit codes for all commands
+3. Create scriptable interfaces for drive management
+4. Establish foundation for future advanced modes
+
+**Future Phases Deferred (To Circle Back)**:
+- ⏳ **Phase 3.2**: Advanced Workflows (guided drive replacement, bulk operations)
+- ⏳ **Phase 3.3**: Monitoring System (background health checks, notifications)
+- ⏳ **Phase 3.4**: Integration Features (external monitoring, alerting)
+
+---
+
+## 🚀 Phase 3.1: CLI/Script Mode Enhancement
+
+### **Objective**: Transform existing commands into automation-friendly interfaces
+
+### **📋 Phase 3.1 Implementation Plan**
+
+#### **3.1.1 Flag System Implementation**
+- **--quiet / -q**: Minimal output for automation scripts
+- **--verbose / -v**: Detailed output for debugging and logging
+- **--json**: Machine-readable JSON output for integration
+- **--no-color**: Plain text output for log files and scripts
+
+#### **3.1.2 Exit Code Standardization**
+- **0**: Success (operation completed successfully)
+- **1**: General error (invalid arguments, missing files)
+- **2**: Drive not found or inaccessible
+- **3**: Health critical (drive failure detected)
+- **4**: Capacity critical (drive full or near full)
+- **5**: Hardware error (LED control, arcconf failure)
+
+#### **3.1.3 Enhanced Command Targets**
+**Priority Commands for Enhancement**:
+1. `pooltool health` - Health checking with automation flags
+2. `pooltool capacity` - Capacity reporting for monitoring
+3. `pooltool select` - Non-interactive drive selection
+4. `pooltool blink` - LED control with feedback
+5. `pooltool overview` - System status for dashboards
+
+#### **3.1.4 Implementation Strategy**
+1. **Start with health command** - Most critical for automation
+2. **Add universal flag parsing** - Shared flag handling across commands
+3. **Implement exit codes** - Consistent error reporting
+4. **Add JSON output** - Machine-readable format
+5. **Test automation scenarios** - Validate script integration
+
+### **📊 Phase 3.1 Success Metrics**
+- ✅ All commands support --quiet, --verbose, --json flags
+- ✅ Consistent exit codes across all operations
+- ✅ JSON output parseable by monitoring tools
+- ✅ No breaking changes to existing functionality
+- ✅ Documentation updated with automation examples
 
 **Enhanced Foundation Quality**: The excellent visual layout and drive utilities we've built provide the perfect foundation for this multi-modal system. The modular architecture makes implementing different interaction modes straightforward while maintaining consistency across all modes.
