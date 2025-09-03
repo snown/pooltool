@@ -141,6 +141,20 @@ function main {
     ;;
   # Test commands for development
   test-drives)
+    echo "Testing drive utilities module..."
+    
+    echo -e "\nTesting create_unified_mapping..."
+    pooltool::create_unified_mapping 1
+    
+    echo -e "\nTesting get_physical_layout..."
+    unified_data=$(pooltool::create_unified_mapping 1 2>/dev/null)
+    if [[ -n "$unified_data" ]]; then
+      mapfile -t unified_array <<< "$unified_data"
+      pooltool::get_physical_layout "${unified_array[@]}"
+    else
+      echo "No unified data available"
+    fi
+    ;;
   drivemap)
     if command -v pooltool::commands::drivemap &>/dev/null; then
       shift
