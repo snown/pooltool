@@ -186,8 +186,10 @@ function main {
           
           case "$user_input" in
             [1-9]|1[0-9]|2[0-4])
-              echo "Drive Position $user_input Details:"
-              echo "=================================="
+              echo
+              echo "╔════════════════════════════════════════════════════════════════════╗"
+              echo "║                     Drive Position $user_input Details                      ║"
+              echo "╚════════════════════════════════════════════════════════════════════╝"
               
               # Find the drive at this position by iterating through all drives and calculating their positions
               local drive_found=false
@@ -213,23 +215,49 @@ function main {
                     local model="${BASH_REMATCH[11]}"
                     local size="${BASH_REMATCH[12]}"
                     
-                    echo "Mount Name: $mount_name"
-                    echo "Device Path: $system_device"
-                    echo "Model: $model"
-                    echo "Size: $size"
-                    echo "Serial: $serial"
-                    if [[ -n "$snapraid_name" ]]; then
-                      echo "SnapRAID Role: $snapraid_name"
-                    else
-                      echo "SnapRAID Role: Not assigned"
+                    # Drive Header Section
+                    echo
+                    echo "📊 DRIVE OVERVIEW"
+                    echo "═════════════════"
+                    printf "  %-20s %s\n" "Mount Name:" "$mount_name"
+                    printf "  %-20s %s\n" "Device Path:" "$system_device"
+                    printf "  %-20s %s\n" "Model:" "$model"
+                    printf "  %-20s %s\n" "Size:" "$size"
+                    printf "  %-20s %s\n" "Serial Number:" "$serial"
+                    if [[ -n "$wwn" && "$wwn" != "N/A" ]]; then
+                      printf "  %-20s %s\n" "WWN:" "$wwn"
                     fi
-                    echo "Arcconf Position: Channel 0, Device $arcconf_id"
-                                        echo "Physical Position: Connector $rec_connector, Slot $rec_device"
+                    
+                    # SnapRAID Section
+                    echo
+                    echo "🔧 SNAPRAID INTEGRATION"
+                    echo "════════════════════════"
+                    if [[ -n "$snapraid_name" && "$snapraid_name" != "NONE" ]]; then
+                      printf "  %-20s %s\n" "SnapRAID Role:" "$snapraid_name"
+                      if [[ "$snapraid_name" =~ ^data ]]; then
+                        printf "  %-20s %s\n" "Function:" "Data Storage Drive"
+                      elif [[ "$snapraid_name" =~ ^parity ]]; then
+                        printf "  %-20s %s\n" "Function:" "Parity Protection Drive"
+                      fi
+                    else
+                      printf "  %-20s %s\n" "SnapRAID Role:" "🔶 Not assigned"
+                      printf "  %-20s %s\n" "Status:" "Available for assignment"
+                    fi
+                    
+                    # Physical Location Section  
+                    echo
+                    echo "📍 PHYSICAL LOCATION"
+                    echo "═════════════════════"
+                    printf "  %-20s %s\n" "Physical Position:" "Position $position_num"
+                    printf "  %-20s %s\n" "Connector:" "$rec_connector"
+                    printf "  %-20s %s\n" "Device Slot:" "$rec_device"
+                    printf "  %-20s %s\n" "Arcconf ID:" "Channel 0, Device $arcconf_id"
                     
                     # Get health information if available
                     if [[ "$system_device" != "N/A" ]]; then
                       echo
-                      echo "Health Information:"
+                      echo "💚 HEALTH & MONITORING"
+                      echo "═══════════════════════"
                       health_info=$(pooltool::get_drive_health "$system_device" "$controller")
                       if [[ "$health_info" =~ ^([^:]+):([^:]+):([^:]+):([^:]+)$ ]]; then
                         local health_status="${BASH_REMATCH[1]}"
@@ -237,17 +265,50 @@ function main {
                         local power_hours="${BASH_REMATCH[3]}"
                         local reallocated="${BASH_REMATCH[4]}"
                         
-                        echo "  Status: $health_status"
+                        # Health status with color coding
+                        local status_display
+                        case "$health_status" in
+                          "good") status_display="✅ Healthy" ;;
+                          "warning") status_display="⚠️  Warning" ;;
+                          "critical") status_display="❌ Critical" ;;
+                          *) status_display="❓ Unknown" ;;
+                        esac
+                        printf "  %-20s %s\n" "Overall Status:" "$status_display"
+                        
                         if [[ $temperature -gt 0 ]]; then
-                          echo "  Temperature: ${temperature}°C"
+                          local temp_status
+                          if [[ $temperature -gt 55 ]]; then
+                            temp_status="🔥 High"
+                          elif [[ $temperature -gt 45 ]]; then
+                            temp_status="🔶 Warm"
+                          else
+                            temp_status="❄️  Cool"
+                          fi
+                          printf "  %-20s %s (%s)\n" "Temperature:" "${temperature}°C" "$temp_status"
                         fi
+                        
                         if [[ $power_hours -gt 0 ]]; then
                           local years=$((power_hours / 8760))
                           local days=$(( (power_hours % 8760) / 24 ))
-                          echo "  Power-on Time: ${power_hours}h (${years}y ${days}d)"
+                          local hours=$((power_hours % 24))
+                          printf "  %-20s %s (%dy %dd %dh)\n" "Power-on Time:" "${power_hours}h" "$years" "$days" "$hours"
+                          
+                          # Age assessment
+                          local age_status
+                          if [[ $years -gt 5 ]]; then
+                            age_status="🔶 Mature drive"
+                          elif [[ $years -gt 3 ]]; then
+                            age_status="✅ Established"
+                          else
+                            age_status="🆕 Relatively new"
+                          fi
+                          printf "  %-20s %s\n" "Age Assessment:" "$age_status"
                         fi
+                        
                         if [[ $reallocated -gt 0 ]]; then
-                          echo "  Reallocated Sectors: $reallocated"
+                          printf "  %-20s %s ⚠️\n" "Reallocated Sectors:" "$reallocated"
+                        else
+                          printf "  %-20s %s ✅\n" "Reallocated Sectors:" "None"
                         fi
                       fi
                     fi
@@ -257,30 +318,228 @@ function main {
                       local expected_mount="/mnt/${mount_name}"
                       if mountpoint -q "$expected_mount" 2>/dev/null; then
                         echo
-                        echo "Capacity Information:"
+                        echo "💾 CAPACITY & USAGE"
+                        echo "════════════════════"
                         local df_output
                         if df_output=$(df -h "$expected_mount" 2>/dev/null | tail -n1); then
                           local size_h used_h avail_h use_percent
                           read -r _ size_h used_h avail_h use_percent _ <<< "$df_output"
-                          echo "  Total Size: $size_h"
-                          echo "  Used Space: $used_h"
-                          echo "  Available: $avail_h"
-                          echo "  Usage: $use_percent"
+                          
+                          printf "  %-20s %s\n" "Total Capacity:" "$size_h"
+                          printf "  %-20s %s\n" "Used Space:" "$used_h"
+                          printf "  %-20s %s\n" "Available Space:" "$avail_h"
+                          
+                          # Usage percentage with visual bar
+                          local usage_num=$(echo "$use_percent" | tr -d '%')
+                          local usage_status
+                          if [[ $usage_num -gt 95 ]]; then
+                            usage_status="🔴 Critical"
+                          elif [[ $usage_num -gt 85 ]]; then
+                            usage_status="🔶 High"
+                          elif [[ $usage_num -gt 70 ]]; then
+                            usage_status="🔶 Moderate"
+                          else
+                            usage_status="✅ Good"
+                          fi
+                          
+                          # Create usage bar
+                          local bar_length=20
+                          local filled_length=$((usage_num * bar_length / 100))
+                          local usage_bar=""
+                          for ((i=0; i<filled_length; i++)); do
+                            usage_bar+="▓"
+                          done
+                          for ((i=filled_length; i<bar_length; i++)); do
+                            usage_bar+="░"
+                          done
+                          
+                          printf "  %-20s %s [%s] %s\n" "Usage:" "$use_percent" "$usage_bar" "$usage_status"
                         fi
                       else
                         echo
-                        echo "Capacity Information: Not mounted"
+                        echo "💾 CAPACITY & USAGE"
+                        echo "════════════════════"
+                        printf "  %-20s %s\n" "Mount Status:" "🔶 Not mounted"
+                        printf "  %-20s %s\n" "Availability:" "Drive ready for use"
                       fi
+                    else
+                      echo
+                      echo "💾 CAPACITY & USAGE"  
+                      echo "════════════════════"
+                      printf "  %-20s %s\n" "Drive Status:" "🔶 Unallocated"
+                      printf "  %-20s %s\n" "Availability:" "Ready for allocation"
                     fi
                     
+                    # Actions Section
                     echo
+                    echo "⚡ AVAILABLE ACTIONS"
+                    echo "════════════════════"
+                    echo "  b  - Blink drive LED for physical identification"
+                    echo "  r  - Refresh drive information"  
+                    echo "  s  - Show detailed SMART analysis"
+                    echo "  Enter - Return to drive selection"
+                    
+                    echo
+                    echo "────────────────────────────────────────────────────────────────────"
+                    
+                    # Sub-action prompt
+                    local sub_action
+                    sub_action="$(bashful input -p "Action (b/r/s or Enter to continue):" -d "")"
+                    
+                    case "$sub_action" in
+                      "b"|"blink")
+                        echo
+                        echo "🔆 BLINKING DRIVE LED"
+                        echo "═════════════════════"
+                        if [[ "$system_device" != "N/A" && "$system_device" != "NONE" ]]; then
+                          echo "Blinking LED for drive at position $position_num ($system_device)..."
+                          if timeout 10 pooltool::commands::blink --device "$system_device" 2>/dev/null; then
+                            echo "✅ Drive LED blink command sent successfully"
+                            echo "💡 Look for the blinking LED on the physical drive"
+                          else
+                            echo "⚠️  Blink command failed - drive may not support LED control"
+                          fi
+                        else
+                          echo "⚠️  Cannot blink LED - drive not available or unallocated"
+                        fi
+                        echo
+                        echo "Press Enter to continue..."
+                        read -r
+                        ;;
+                      "r"|"refresh")
+                        echo
+                        echo "🔄 REFRESHING DRIVE DATA"
+                        echo "════════════════════════"
+                        echo "Refreshing SMART cache and drive information..."
+                        
+                        # Clear the health cache to force fresh data
+                        if command -v pooltool::refresh_smart_cache >/dev/null 2>&1; then
+                          pooltool::refresh_smart_cache "$controller"
+                          echo "✅ SMART cache refreshed"
+                        fi
+                        
+                        # Get fresh unified data
+                        unified_data=$(pooltool::create_unified_mapping "$controller" 2>/dev/null)
+                        if [[ -n "$unified_data" ]]; then
+                          mapfile -t unified_array <<< "$unified_data"
+                          echo "✅ Drive mapping refreshed"
+                        fi
+                        
+                        echo "✅ Data refresh complete"
+                        echo
+                        echo "Press Enter to continue..."
+                        read -r
+                        ;;
+                      "s"|"smart")
+                        echo
+                        echo "🔍 DETAILED SMART ANALYSIS"
+                        echo "═══════════════════════════"
+                        if [[ "$system_device" != "N/A" && "$system_device" != "NONE" ]]; then
+                          echo "Performing detailed SMART analysis for $system_device..."
+                          echo
+                          
+                          # Get extended health info
+                          health_info=$(pooltool::get_drive_health "$system_device" "$controller")
+                          if [[ "$health_info" =~ ^([^:]+):([^:]+):([^:]+):([^:]+)$ ]]; then
+                            local health_status="${BASH_REMATCH[1]}"
+                            local temperature="${BASH_REMATCH[2]}"
+                            local power_hours="${BASH_REMATCH[3]}"
+                            local reallocated="${BASH_REMATCH[4]}"
+                            
+                            echo "📊 SMART DATA SUMMARY"
+                            echo "──────────────────────"
+                            printf "  %-25s %s\n" "Health Status:" "$health_status"
+                            printf "  %-25s %s°C\n" "Current Temperature:" "$temperature"
+                            printf "  %-25s %s hours\n" "Total Power-on Time:" "$power_hours"
+                            printf "  %-25s %s\n" "Reallocated Sectors:" "$reallocated"
+                            
+                            echo
+                            echo "🏥 HEALTH ASSESSMENT"
+                            echo "────────────────────"
+                            
+                            # Temperature assessment
+                            if [[ $temperature -gt 0 ]]; then
+                              if [[ $temperature -gt 60 ]]; then
+                                echo "  🔥 Temperature: CRITICAL - Drive running very hot"
+                              elif [[ $temperature -gt 55 ]]; then
+                                echo "  🔶 Temperature: WARNING - Drive running hot"
+                              elif [[ $temperature -gt 45 ]]; then
+                                echo "  🔶 Temperature: MODERATE - Drive warm but acceptable"
+                              else
+                                echo "  ✅ Temperature: GOOD - Drive running cool"
+                              fi
+                            fi
+                            
+                            # Power-on time assessment
+                            if [[ $power_hours -gt 0 ]]; then
+                              local years=$((power_hours / 8760))
+                              if [[ $years -gt 7 ]]; then
+                                echo "  🔶 Age: MATURE - Consider replacement planning"
+                              elif [[ $years -gt 5 ]]; then
+                                echo "  🔶 Age: ESTABLISHED - Monitor closely"
+                              elif [[ $years -gt 3 ]]; then
+                                echo "  ✅ Age: PRIME - Drive in good operational period"
+                              else
+                                echo "  ✅ Age: NEW - Drive has plenty of life remaining"
+                              fi
+                            fi
+                            
+                            # Reallocated sectors assessment
+                            if [[ $reallocated -gt 0 ]]; then
+                              if [[ $reallocated -gt 100 ]]; then
+                                echo "  ❌ Sectors: CRITICAL - High reallocated sector count"
+                              elif [[ $reallocated -gt 10 ]]; then
+                                echo "  ⚠️  Sectors: WARNING - Monitor reallocated sectors"
+                              else
+                                echo "  🔶 Sectors: MINOR - Small number of reallocated sectors"
+                              fi
+                            else
+                              echo "  ✅ Sectors: PERFECT - No reallocated sectors detected"
+                            fi
+                            
+                            echo
+                            echo "💡 RECOMMENDATION"
+                            echo "─────────────────"
+                            if [[ "$health_status" == "critical" || $reallocated -gt 100 || $temperature -gt 60 ]]; then
+                              echo "  ❌ IMMEDIATE ACTION: Consider drive replacement"
+                            elif [[ "$health_status" == "warning" || $reallocated -gt 0 || $temperature -gt 55 || $years -gt 7 ]]; then
+                              echo "  ⚠️  MONITOR CLOSELY: Watch for degradation"
+                            else
+                              echo "  ✅ HEALTHY: Drive operating normally"
+                            fi
+                          else
+                            echo "⚠️  Unable to retrieve detailed SMART data"
+                          fi
+                        else
+                          echo "⚠️  Cannot analyze SMART data - drive not available"
+                        fi
+                        echo
+                        echo "Press Enter to continue..."
+                        read -r
+                        ;;
+                      ""|" ")
+                        # Just continue - no action needed
+                        ;;
+                      *)
+                        echo "Invalid action '$sub_action'. Available: b(blink), r(refresh), s(smart)"
+                        echo "Press Enter to continue..."
+                        read -r
+                        ;;
+                    esac
                     break
                   fi
                 fi
               done
               
               if [[ "$drive_found" == false ]]; then
-                echo "Position $position_num: Empty bay"
+                echo
+                echo "📭 EMPTY BAY"
+                echo "═════════════"
+                printf "  %-20s %s\n" "Position:" "$position_num"
+                printf "  %-20s %s\n" "Status:" "🔶 No drive installed"  
+                printf "  %-20s %s\n" "Availability:" "Ready for drive installation"
+                echo
+                echo "💡 You can install a new drive in this position."
                 echo
               fi
               ;;
