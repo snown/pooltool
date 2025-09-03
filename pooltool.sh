@@ -25,23 +25,33 @@ bootstrap_load_module snown/pansi
 bootstrap_load_module snown/here_printf
 
 function print_help {
-  snown::here_printf <<-HELP
-$(snown::pansi --bold "USAGE:")
+  cat << 'EOF'
+USAGE:
   pooltool [-h|--help]
   pooltool <command> [-h|--help] [<args>]
   
-$(snown::pansi --bold "FLAGS:")
+FLAGS:
   -h, --help  Print this help message.
   
-$(snown::pansi --bold "COMMANDS:")
-  find    $(pooltool::commands::find::print_summary 10)
-  cp      $(pooltool::commands::cp::print_summary 10)
-  mv      $(pooltool::commands::mv::print_summary 10)
-  disk    $(pooltool::commands::disk::print_summary 10) 
-  blink   Blink drive LEDs with visual layout for drive identification
-  drivemap Visual drive bay layout without LED blinking for reference
-  devices $(snapraid::print_summary 10)
-HELP
+COMMANDS:
+  find        Find files and directories in the pool
+  cp          Copy files within the pool
+  mv          Move files within the pool  
+  disk        Manage and add new disks to the pool
+  devices     Show snapraid device information
+  drivemap    Show visual drive bay layout
+  blink       Blink drive LEDs to identify drives in snapraid
+
+EXAMPLES:
+  pooltool devices                    # Show all snapraid devices
+  pooltool blink                      # Blink all snapraid drives
+  pooltool drivemap                   # Show drive bay layout map  
+  pooltool blink --help               # Show blink command help
+  pooltool find /path/to/search       # Find files in pool
+
+For detailed help on a specific command, use:
+  pooltool <command> --help
+EOF
 }
 
 function main {
