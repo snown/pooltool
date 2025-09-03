@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+#NAMESPACE=pooltool::commands
+
+dependencies::depends "pooltool/pathtools"
+dependencies::depends "pooltool/raidtools"
+dependencies::depends "pooltool/commands/find"
+dependencies::depends "pooltool/commands/cp"
+dependencies::register_module "pooltool/commands/mv"
+
+function mv {
+  if [[ $# -le 1 ]]; then
+    echo "We need at least two arguments"
+    this::print_help
+    exit 1
+  fi
+  
+  while [[ $# -gt 0 ]]; do
+    local _key="$1"
+    case "${_key}" in
+    -h|--help)
+      this::print_help
+      break
+      ;;
+    *)
+      if [[ $# -eq 1 ]]; then
+        target="${_key}"
+      else
+        if [[ ! -e "${_key}" ]]; then
+          echo "Source item does not exist: $1"
+          this::print_help
+          exit 1
+        fi
+        sources+=( "$(pooltool::abspath "${_key}")" )
+      fi
+    esac
+    shift
+  done
+  
+  if [[ ${#sources[@]} -lt 1 ]]; then
+    echo "Need at least one source item"
+    this::print_help
+    exit 1
+  fi
+  if [[ -z ${target:+x} ]]; then
+    echo "Need a target destination"
+    this::print_help
+    exit 1
+  fi
+  if ! $(pooltool::is_raid_path "${target}"); then
+    echo "Target destination must be in the RAID: \"${RAID_LOCATION}\""
+    this::print_help
+    exit 1
+  fi
+  
+  pooltool::commands::cp "${sources[@]}" "${target}"
+  local real_sources=( $"$(pooltool::commands::find "${sources[@]}")" )
+  for source in "${real_sources[@]}"; do
+    echo "=> rm -r ${source}"
+    rm -r "${source}"
+  done
+}

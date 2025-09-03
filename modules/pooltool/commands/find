@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+#NAMESPACE=pooltool::commands
+
+dependencies::depends "pooltool/pathtools"
+dependencies::register_module "pooltool/commands/find"
+
+function print_help {
+  echo "Find your OWN help"
+}
+
+function find {
+  local paths=()
+  
+  while [[ $# -gt 0 ]]; do
+    local _key="$1"
+    case "${_key}" in
+    -h|--help)
+      this::print_help
+      break
+      ;;
+    *)
+      local tempPath="$(pooltool::abspath "${_key}")"
+      paths+=( "${tempPath#${RAID_LOCATION}}" )
+    esac
+    shift
+  done
+  
+  local path
+  for path in "${paths[@]}"; do
+    local dru
+    for dru in "${DRU_MOUNT_POINT}"/DRU*; do
+      if [[ -e "${dru}/${path#/}" ]]; then
+        path="${dru}/${path#/}"
+        break
+      fi
+    done
+    
+    echo "${path}"
+  done
+}

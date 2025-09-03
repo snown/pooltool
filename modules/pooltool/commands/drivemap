@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+#NAMESPACE=pooltool::commands
+
+dependencies::depends "pooltool/driveutils"
+dependencies::depends "pooltool/drivevisualizer"
+dependencies::register_module "pooltool/commands/drivemap"
+
+function drivemap {
+    # Parse arguments
+    local use_colors="true"
+    local controller="1"
+    local label_type="mount"
+    
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --no-color)
+                use_colors="false"
+                shift
+                ;;
+            --controller)
+                controller="$2"
+                shift 2
+                ;;
+            --labels)
+                label_type="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat << 'HELPEOF'
+Usage: pooltool drivemap [OPTIONS]
+
+Show visual drive bay layout for drive identification.
+
+OPTIONS:
+    --no-color         Disable colors (use symbols only)
+    --controller N     Target specific controller (default: 1)
+    --labels TYPE      Label style: mount|device|arcconf|snapraid (default: mount)
+    -h, --help         Show this help message
+
+DESCRIPTION:
+    This command shows a visual ASCII representation of your server's
+    drive bay layout, helping you locate physical drives without blinking.
+    
+    It displays a 6x4 grid representing your physical drive bays with
+    real-time device information from arcconf and snapraid.
+
+EXAMPLES:
+    pooltool drivemap                     # Show drive layout with mount names
+    pooltool drivemap --no-color          # Show layout without colors
+    pooltool drivemap --labels device     # Show device paths (sda, sdb, etc.)
+    pooltool drivemap --labels arcconf    # Show arcconf positions (C0D0, C0D1, etc.)
+    pooltool drivemap --controller 2      # Show drives on controller 2
+
+HELPEOF
+                return 0
+                ;;
+            *)
+                echo "Unknown option: $1"
+                echo "Use 'pooltool drivemap --help' for usage information."
+                return 1
+                ;;
+        esac
+    done
+
+    # Initialize colors (not strictly needed for new visualization but good practice)
+    pooltool::init_visual_colors "$use_colors"
+
+    # Get unified device data using the new utilities
+    local unified_data
+    if unified_data=$(pooltool::create_unified_mapping "$controller" 2>/dev/null); then
+        if [[ -n "$unified_data" ]]; then
+            readarray -t unified_array <<< "$unified_data"
+            
+            # Get the physical layout from the unified data
+            local layout_data
+            if layout_data=$(pooltool::get_physical_layout "${unified_array[@]}"); then
+                # Use the new visualization system - no blinking devices for drivemap
+                pooltool::render_drive_grid "$layout_data" "$label_type" "" "$use_colors" "${unified_array[@]}"
+            else
+                echo "Error: Failed to generate physical layout" >&2
+                return 1
+            fi
+        else
+            echo "No devices found on controller $controller" >&2
+            return 1
+        fi
+    else
+        echo "Error: Failed to get device information" >&2
+        echo "Please ensure arcconf is working and you have proper permissions" >&2
+        return 1
+    fi
+}

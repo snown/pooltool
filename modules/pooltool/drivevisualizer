@@ -1,0 +1,401 @@
+#!/usr/bin/env bash
+#NAMESPACE=pooltool
+
+dependencies::depends "pooltool/driveutils"
+dependencies::register_module "pooltool/drivevisualizer"
+
+# Initialize color scheme for visual display
+#-------------------------------------------------------------------------------
+function init_visual_colors {
+    local use_colors="${1:-true}"
+    
+    # Global color variables (will be used by other functions)
+    if [[ "$use_colors" == "true" ]]; then
+        LED_OFF_COLOR=$'\033[2m'      # Dim gray
+        LED_ON_COLOR=$'\033[32m'      # Green  
+        LED_UNALLOCATED_COLOR=$'\033[33m'  # Yellow
+        RESET_COLOR=$'\033[0m'        # Reset
+        LED_OFF="${LED_OFF_COLOR}●${RESET_COLOR}"
+        LED_ON="${LED_ON_COLOR}●${RESET_COLOR}"
+        LED_UNALLOCATED="${LED_UNALLOCATED_COLOR}+${RESET_COLOR}"
+    else
+        LED_OFF_COLOR=""
+        LED_ON_COLOR=""
+        LED_UNALLOCATED_COLOR=""
+        RESET_COLOR=""
+        LED_OFF="○"                  # Open circle for non-blinking
+        LED_ON="●"                   # Filled circle for blinking
+        LED_UNALLOCATED="+"          # Plus sign for unallocated
+    fi
+}
+
+# Calculate optimal label dimensions and grid sizing
+#-------------------------------------------------------------------------------
+function calculate_label_dimensions {
+    local device_data=("$@")
+    local label_type="${1:-mount}"
+    shift
+    local device_records=("$@")
+    
+    local max_label_length=0
+    local current_length
+    
+    # Find the longest label in the selected category
+    for record in "${device_records[@]}"; do
+        local label=""
+        
+        # Parse record format: mount_name:arcconf_id:connector:device_slot:snapraid_name:system_device:wwn:serial:channel:device_num:model:size:match_method
+        if [[ "$record" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*):([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+            local mount_name="${BASH_REMATCH[1]}"
+            local arcconf_id="${BASH_REMATCH[2]}"
+            local connector="${BASH_REMATCH[3]}"
+            local device_slot="${BASH_REMATCH[4]}"
+            local snapraid_name="${BASH_REMATCH[5]}"
+            local system_device="${BASH_REMATCH[6]}"
+            
+            case "$label_type" in
+                "mount")
+                    label="$mount_name"
+                    ;;
+                "snapraid")
+                    label="${snapraid_name:-$mount_name}"
+                    ;;
+                "device")
+                    # Remove /dev/ prefix from device path to match format_device_label
+                    label="${system_device#/dev/}"
+                    ;;
+                "arcconf")
+                    label="C${connector}D${device_slot}"
+                    ;;
+                *)
+                    label="$mount_name"  # Default fallback
+                    ;;
+            esac
+            
+            current_length=${#label}
+            if [[ $current_length -gt $max_label_length ]]; then
+                max_label_length=$current_length
+            fi
+        fi
+    done
+    
+    # Handle empty bays - they use "-----" pattern
+    local empty_label_length=5  # Length of "-----"
+    if [[ $empty_label_length -gt $max_label_length ]]; then
+        max_label_length=$empty_label_length
+    fi
+    
+    # Calculate dimensions
+    local cell_width=$((max_label_length + 3))  # [label + space + indicator]
+    local total_width=$((cell_width * 4 + 8))   # 4 cells + spacing between cells
+    local box_width=$((total_width + 8))         # borders + internal padding
+    
+    # Output the calculated dimensions
+    echo "DIMENSIONS:$max_label_length:$cell_width:$total_width:$box_width"
+}
+
+# Format individual device label with proper padding
+#-------------------------------------------------------------------------------
+function format_device_label {
+    local record="$1"
+    local label_type="$2"
+    local max_width="$3"
+    local status="${4:-available}"
+    
+    local label=""
+    local indicator=""
+    
+    # Handle special case for empty slots
+    if [[ "$record" == "EMPTY" ]]; then
+        # Start the empty label with two '-' characters to account for the space taken by the indicator
+        local empty_label="--"
+        for ((i=0; i<max_width; i++)); do
+            empty_label+="-"
+        done
+        echo "[$empty_label]"
+        return
+    fi
+    
+    # Parse record format
+    if [[ "$record" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*):([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+        local mount_name="${BASH_REMATCH[1]}"
+        local arcconf_id="${BASH_REMATCH[2]}"
+        local connector="${BASH_REMATCH[3]}"
+        local device_slot="${BASH_REMATCH[4]}"
+        local snapraid_name="${BASH_REMATCH[5]}"
+        local system_device="${BASH_REMATCH[6]}"
+        
+        case "$label_type" in
+            "mount")
+                label="$mount_name"
+                ;;
+            "snapraid")
+                label="${snapraid_name:-$mount_name}"
+                ;;
+            "device")
+                # Remove /dev/ prefix from device path
+                label="${system_device#/dev/}"
+                ;;
+            "arcconf")
+                label="C${connector}D${device_slot}"
+                ;;
+            *)
+                label="$mount_name"  # Default fallback
+                ;;
+        esac
+        
+        # Set indicator based on status
+        case "$status" in
+            "blinking")
+                indicator=" ${LED_ON}"
+                ;;
+            "available")
+                indicator=" ${LED_OFF}"
+                ;;
+            "unallocated")
+                # Use a different indicator for unallocated drives (drives detected by arcconf but not in snapraid)
+                indicator=" ${LED_UNALLOCATED}"
+                ;;
+            *)
+                indicator=" ${LED_OFF}"
+                ;;
+        esac
+        
+        # Pad label to max width
+        local padded_label="$label"
+        while [[ ${#padded_label} -lt $max_width ]]; do
+            padded_label+=" "
+        done
+        
+        echo "[$padded_label$indicator]"
+    else
+        # Fallback for unparseable records
+        local padded_label="UNKNOWN"
+        while [[ ${#padded_label} -lt $max_width ]]; do
+            padded_label+=" "
+        done
+        echo "[$padded_label ${LED_OFF}]"
+    fi
+}
+
+# Render complete ASCII drive grid
+#-------------------------------------------------------------------------------
+function render_drive_grid {
+    local physical_layout_data="$1"
+    local label_type="${2:-mount}"
+    local blinking_devices_str="${3:-}"
+    local use_colors="${4:-true}"
+    local unified_device_data=("${@:5}")  # Remaining args are unified device records
+    
+    # Initialize colors
+    pooltool::init_visual_colors "$use_colors"
+    
+    # Parse blinking devices
+    local -A is_blinking
+    if [[ -n "$blinking_devices_str" ]]; then
+        IFS=',' read -ra blinking_array <<< "$blinking_devices_str"
+        for device_id in "${blinking_array[@]}"; do
+            is_blinking["$device_id"]=1
+        done
+    fi
+    
+    # Parse physical layout data to extract position, device name, and status
+    local -A layout_by_position
+    local -A status_by_position
+    
+    # Skip the "PHYSICAL_LAYOUT:" header and process the layout rows
+    local in_layout=false
+    local connector_index=0
+    while IFS= read -r line; do
+        if [[ "$line" == "PHYSICAL_LAYOUT:" ]]; then
+            in_layout=true
+            continue
+        fi
+        
+        if [[ "$in_layout" == true && -n "$line" ]]; then
+            # Parse layout row: "device1:status1 device2:status2 device3:status3 device4:status4"
+            # The order in the line is: device3, device2, device1, device0 (left to right in the display)
+            
+            # Use read to split the line into device:status pairs
+            read -ra device_pairs <<< "$line"
+            local device_index=3  # Start from device 3
+            for device_pair in "${device_pairs[@]}"; do
+                if [[ "$device_pair" =~ ^([^:]+):(.+)$ ]]; then
+                    local device_name="${BASH_REMATCH[1]}"
+                    local device_status="${BASH_REMATCH[2]}"
+                    
+                    local position_key="${connector_index}_${device_index}"
+                    layout_by_position["$position_key"]="$device_name"
+                    status_by_position["$position_key"]="$device_status"
+                    
+                    ((device_index--))
+                fi
+            done
+            ((connector_index++))
+        fi
+    done <<< "$physical_layout_data"
+    
+    # Create device lookup by position for label resolution
+    local -A device_by_position
+    for record in "${unified_device_data[@]}"; do
+        if [[ "$record" =~ ^([^:]+):([^:]+):([^:]+):([^:]+): ]]; then
+            local mount_name="${BASH_REMATCH[1]}"
+            local arcconf_id="${BASH_REMATCH[2]}"
+            local connector="${BASH_REMATCH[3]}"
+            local device_slot="${BASH_REMATCH[4]}"
+            
+            local position_key="${connector}_${device_slot}"
+            device_by_position["$position_key"]="$record"
+        fi
+    done
+    
+    # Calculate label dimensions
+    local dimensions_output
+    dimensions_output=$(pooltool::calculate_label_dimensions "$label_type" "${unified_device_data[@]}")
+    
+    if [[ "$dimensions_output" =~ ^DIMENSIONS:([^:]+):([^:]+):([^:]+):([^:]+)$ ]]; then
+        local max_label_length="${BASH_REMATCH[1]}"
+        local cell_width="${BASH_REMATCH[2]}"
+        local total_width="${BASH_REMATCH[3]}"
+        local box_width="${BASH_REMATCH[4]}"
+    else
+        # Fallback dimensions
+        local max_label_length=8
+        local cell_width=12
+        local total_width=56
+        local box_width=64
+    fi
+    
+    # Create top border
+    local border_line=""
+    for ((i=0; i<box_width; i++)); do
+        border_line+="─"
+    done
+
+    # Create Title
+    local title="Physical Drive Bay Layout"
+    local title_padding=$(( (box_width - ${#title}) ))
+    local left_padding=$(( title_padding / 2 ))
+    local right_padding=$(( title_padding - left_padding ))
+    local padded_title=$(printf "%*s" $left_padding "" )"$title"$(printf "%*s" $right_padding "" )
+
+    # Render the grid
+    echo
+    echo "┌${border_line}┐"
+    echo "│$padded_title│"
+    echo "├${border_line}┤"
+    echo "│$(printf "%*s" $((box_width)) "")│"
+    
+    # Render each row (connector 0-5)
+    for connector in {0..5}; do
+        local row_output="│  "
+        
+        # Render each column (device 3,2,1,0 - right to left)
+        for device in 3 2 1 0; do
+            local position_key="${connector}_${device}"
+            local device_name="${layout_by_position[$position_key]:-EMPTY}"
+            local device_status="${status_by_position[$position_key]:-empty}"
+            local device_record="${device_by_position[$position_key]:-}"
+            
+            # Check if this device is blinking (overrides other status)
+            if [[ -n "$device_record" && "$device_record" =~ ^([^:]+):([^:]+): ]]; then
+                local mount_name="${BASH_REMATCH[1]}"
+                local arcconf_id="${BASH_REMATCH[2]}"
+                
+                if [[ -n "${is_blinking[$arcconf_id]}" ]]; then
+                    device_status="blinking"
+                fi
+            fi
+            
+            # For formatting, we need either the device record or a dummy record for empty/unallocated
+            local format_record="$device_record"
+            if [[ -z "$format_record" ]]; then
+                # Create a dummy record for empty or unallocated devices
+                format_record="$device_name::::::::::::::"
+            fi
+            
+            local formatted_cell
+            formatted_cell=$(pooltool::format_device_label "$format_record" "$label_type" "$max_label_length" "$device_status")
+            row_output+="$formatted_cell  "
+        done
+        
+        echo "$row_output  │"
+    done
+    
+    echo "│$(printf "%*s" $((box_width)) "")│"
+    
+    # Legend with proper padding
+    local legend_line
+    
+    legend_line="│  Legend:"
+    printf -v padding "%*s" $((box_width - ${#legend_line} - 1)) ""
+    echo "${legend_line}${padding}  │"
+    
+    local legend_key_length=10 # The space of a typical legend entry from left padding to the start of the label. This should stay relatively consistent, so we hard code it here. _Note:_ It does not include the left border character.
+    local legend_label="Blinking"
+    legend_line="│    [${LED_ON}] = ${legend_label}"
+    printf -v padding "%*s" $((box_width - (legend_key_length + ${#legend_label}))) ""
+    echo "${legend_line}${padding}│"
+
+    legend_label="Available"
+    legend_line="│    [${LED_OFF}] = ${legend_label}"
+    printf -v padding "%*s" $((box_width - (legend_key_length + ${#legend_label}))) ""
+    echo "${legend_line}${padding}│"
+
+    legend_label="Unallocated"
+    legend_line="│    [${LED_UNALLOCATED}] = ${legend_label}"
+    printf -v padding "%*s" $((box_width - (legend_key_length + ${#legend_label}))) ""
+    echo "${legend_line}${padding}│"
+
+    legend_label="Empty"
+    legend_line="│    [-] = ${legend_label}"
+    printf -v padding "%*s" $((box_width - ${#legend_line} - 1)) ""
+    echo "${legend_line}${padding}  │"
+
+    echo "│$(printf "%*s" $((box_width)) "")│"
+    echo "│  DRU = Data drive, PPU = Parity drive$(printf "%*s" $((box_width-40)) "")  │"
+    echo "└${border_line}┘"
+}
+
+# Simple visual display function for quick testing
+#-------------------------------------------------------------------------------
+function show_drive_layout_simple {
+    local unified_data=("$@")
+    local label_type="mount"
+    local blinking_devices=""
+    local use_colors="true"
+    
+    # Convert unified data to the format expected by render_drive_grid
+    pooltool::render_drive_grid "PHYSICAL_LAYOUT" "$label_type" "$blinking_devices" "$use_colors" "${unified_data[@]}"
+}
+
+# Debug function for testing visualization
+#-------------------------------------------------------------------------------
+function debug_visualization {
+    local controller="${1:-1}"
+    local label_type="${2:-mount}"
+    local use_colors="${3:-true}"
+    
+    echo "=== Debug: Drive Visualizer Module ===" >&2
+    echo >&2
+    
+    # Get unified device data
+    local unified_data
+    if unified_data=$(pooltool::create_unified_mapping "$controller" 2>/dev/null); then
+        readarray -t unified_array <<< "$unified_data"
+        
+        echo "--- Rendering Grid with Label Type: $label_type ---" >&2
+        pooltool::show_drive_layout_simple "${unified_array[@]}"
+        
+        echo >&2
+        echo "--- Testing Different Label Types ---" >&2
+        for test_label in "mount" "snapraid" "device" "arcconf"; do
+            echo "Testing label type: $test_label" >&2
+            pooltool::render_drive_grid "PHYSICAL_LAYOUT" "$test_label" "" "$use_colors" "${unified_array[@]}"
+            echo >&2
+        done
+    else
+        echo "Failed to get unified device data" >&2
+        return 1
+    fi
+}

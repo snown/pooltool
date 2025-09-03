@@ -1,0 +1,604 @@
+#!/usr/bin/env bash
+#NAMESPACE=pooltool::commands
+
+dependencies::depends "snown/script_sudo"
+dependencies::depends "snapraid/devices"
+dependencies::depends "pooltool/driveutils"
+dependencies::depends "pooltool/drivevisualizer"
+dependencies::register_module "pooltool/commands/blink"
+
+function print_help {
+  cat << 'EOF'
+Usage: pooltool blink [OPTIONS]
+
+Blink drive LEDs to help identify drives in your snapraid configuration.
+
+OPTIONS:
+    --in-raid           Blink drives that ARE in snapraid (default)
+    --not-in-raid       Blink drives that are NOT in snapraid
+    --drives NAMES...   Blink specific drives by snapraid name (parity, data1, etc.)
+    --mount-names NAMES... Blink specific drives by mount name (DRU01, PPU01, etc.)
+    --duration SECONDS  Blink for specific duration (default: until Ctrl+C)
+    --dry-run          Show what would be blinked without actually blinking
+    --controller N     Target specific controller (default: all controllers)
+    --verbose          Show detailed device mapping information
+    --visual           Show ASCII visual representation of drive bay layout (default)
+    --text-only        Use text-only output instead of visual display
+    --animate          Enable blinking animation in visual mode (default)
+    --no-animate       Disable blinking animation
+    --no-color         Disable colors in visual display (use symbols only)
+    --visual-labels TYPE  Label style: mount|device|location|snapraid|dev (default: auto)
+    -h, --help         Show this help message
+
+EXAMPLES:
+    pooltool blink                    # Blink all snapraid drives (visual mode)
+    pooltool blink --text-only        # Blink all drives (text-only mode)
+    pooltool blink --not-in-raid      # Blink drives NOT in snapraid
+    pooltool blink --drives parity data1  # Blink specific snapraid drives
+    pooltool blink --mount-names DRU01 DRU02  # Blink specific mount names
+    pooltool blink --duration 30      # Blink for 30 seconds with animation
+    pooltool blink --dry-run          # Show what would be blinked (visual)
+    pooltool blink --no-animate       # Visual mode without animation
+    pooltool blink --no-color         # Visual mode without colors
+    pooltool blink --visual-labels device  # Use device IDs in visual
+
+DESCRIPTION:
+    This command helps identify physical drive locations by blinking their LEDs.
+    It uses the snapraid configuration to determine which drives are part of 
+    your array and uses arcconf to control the drive LEDs.
+    
+    By default, it blinks drives that are part of snapraid and shows a visual
+    ASCII representation of the drive bay layout with animated LED indicators.
+    Use --not-in-raid to identify available drive slots instead.
+    
+    The visual display shows a 6x4 grid representing your physical drive bays,
+    with color-coded LED indicators showing which drives are blinking. Use 
+    --text-only for the classic text-only output.
+    
+    For drive location mapping without blinking, use the standalone 'drivemap' command.
+
+EOF
+}
+
+function blink {
+    local blink_mode="in-raid"  # Default: blink drives in snapraid
+    local specific_drives=()
+    local specific_mount_names=()
+    local duration=""
+    local dry_run=false
+    local target_controller=""
+    local verbose=false
+    local show_visual=true      # Default: show visual display
+    local text_only=false       # Fallback to text-only mode
+    local animate=true          # Default: animate blinking LEDs
+    local visual_labels="auto"
+    local use_colors=true       # Default: use colors in visual display
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --in-raid)
+                blink_mode="in-raid"
+                shift
+                ;;
+            --not-in-raid)
+                blink_mode="not-in-raid"
+                shift
+                ;;
+            --drives)
+                shift
+                while [[ $# -gt 0 && "$1" != --* ]]; do
+                    specific_drives+=("$1")
+                    shift
+                done
+                blink_mode="specific-drives"
+                ;;
+            --mount-names)
+                shift
+                while [[ $# -gt 0 && "$1" != --* ]]; do
+                    specific_mount_names+=("$1")
+                    shift
+                done
+                blink_mode="specific-mount-names"
+                ;;
+            --duration)
+                duration="$2"
+                shift 2
+                ;;
+            --dry-run)
+                dry_run=true
+                shift
+                ;;
+            --controller)
+                target_controller="$2"
+                shift 2
+                ;;
+            --verbose)
+                verbose=true
+                shift
+                ;;
+            --visual)
+                show_visual=true
+                shift
+                ;;
+            --text-only)
+                show_visual=false
+                text_only=true
+                shift
+                ;;
+            --animate)
+                animate=true
+                shift
+                ;;
+            --no-animate)
+                animate=false
+                shift
+                ;;
+            --no-color)
+                use_colors=false
+                shift
+                ;;
+            --visual-labels)
+                visual_labels="$2"
+                shift 2
+                ;;
+            -h|--help)
+                this::print_help
+                return 0
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                echo "Use 'pooltool blink --help' for usage information." >&2
+                return 1
+                ;;
+        esac
+    done
+    
+    # Override visual settings for text-only mode
+    if [[ "$text_only" == true ]]; then
+        show_visual=false
+        animate=false
+    fi
+    
+    # Override animation if visual is disabled
+    if [[ "$show_visual" == false ]]; then
+        animate=false
+    fi
+    
+    # Initialize color settings for new visualization system
+    pooltool::init_visual_colors "$use_colors"
+
+    if [[ "$verbose" == true ]]; then
+        echo "=== Blink Configuration ==="
+        echo "Mode: $blink_mode"
+        echo "Duration: ${duration:-'until Ctrl+C'}"
+        echo "Controller: ${target_controller:-'all'}"
+        echo "Dry run: $dry_run"
+        echo "Visual display: $show_visual"
+        echo "Text-only mode: $text_only"
+        echo "Animation: $animate"
+        echo "Use colors: $use_colors"
+        echo "Visual labels: $visual_labels"
+        if [[ ${#specific_drives[@]} -gt 0 ]]; then
+            echo "Specific drives: ${specific_drives[*]}"
+        fi
+        if [[ ${#specific_mount_names[@]} -gt 0 ]]; then
+            echo "Specific mount names: ${specific_mount_names[*]}"
+        fi
+        echo
+    fi
+    
+    # Auto-detect visual label type based on blink mode
+    if [[ "$visual_labels" == "auto" ]]; then
+        case "$blink_mode" in
+            "specific-drives")
+                visual_labels="snapraid"
+                ;;
+            "specific-mount-names")
+                visual_labels="mount"
+                ;;
+            *)
+                visual_labels="mount"  # Default to mount names
+                ;;
+        esac
+    fi
+    
+    # Validate arcconf is available
+    if ! command -v arcconf >/dev/null 2>&1; then
+        echo "Error: arcconf command not found in PATH" >&2
+        echo "Please ensure arcconf is installed and accessible" >&2
+        return 1
+    fi
+
+    # Get unified device mapping using new utilities
+    if [[ "$verbose" == true ]]; then
+        echo "=== Getting unified device mapping ==="
+    fi
+    
+    local unified_data
+    local controller_id="${target_controller:-1}"
+    if ! unified_data=$(pooltool::create_unified_mapping "$controller_id" 2>/dev/null); then
+        echo "Error: Failed to get device mapping information" >&2
+        echo "Please ensure arcconf is working and you have proper permissions" >&2
+        return 1
+    fi
+    
+    if [[ -z "$unified_data" ]]; then
+        echo "Error: No devices found on controller $controller_id" >&2
+        return 1
+    fi
+    
+    # Parse unified data into arrays for compatibility with existing logic
+    readarray -t unified_array <<< "$unified_data"
+    
+    if [[ "$verbose" == true ]]; then
+        echo "Found ${#unified_array[@]} unified device records"
+        
+        # Show unmapped devices if any
+        local unmapped_count=0
+        for record in "${unified_array[@]}"; do
+            if [[ "$record" =~ :no-arcconf-match$ ]]; then
+                if [[ $unmapped_count -eq 0 ]]; then
+                    echo
+                    echo "Unmapped devices:"
+                fi
+                if [[ "$record" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*):([^:]+): ]]; then
+                    local mount_name="${BASH_REMATCH[1]}"
+                    local system_device="${BASH_REMATCH[6]}"
+                    echo "  - $mount_name ($system_device): no arcconf match"
+                    ((unmapped_count++))
+                fi
+            fi
+        done
+        
+        if [[ $unmapped_count -eq 0 ]]; then
+            echo "All devices successfully mapped!"
+        fi
+        echo
+    fi
+
+    # Create device mapping array for compatibility with existing blink logic
+    local device_mapping=()  # Array of "mount_name:arcconf_device_id"
+    local unmapped_devices=()
+    
+    for record in "${unified_array[@]}"; do
+        # Parse: mount_name:arcconf_id:connector:device_slot:snapraid_name:system_device:wwn:serial:...
+        if [[ "$record" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*):([^:]+): ]]; then
+            local mount_name="${BASH_REMATCH[1]}"
+            local arcconf_id="${BASH_REMATCH[2]}"
+            local system_device="${BASH_REMATCH[6]}"
+            
+            if [[ "$record" =~ :no-arcconf-match$ ]]; then
+                unmapped_devices+=("$mount_name:$system_device:no-arcconf-match")
+            else
+                device_mapping+=("$mount_name:$arcconf_id")
+                if [[ "$verbose" == true ]]; then
+                    echo "  Mapped: $mount_name -> arcconf device #$arcconf_id"
+                fi
+            fi
+        fi
+    done    # Determine which devices to blink based on mode
+    local devices_to_blink=()
+    
+    case "$blink_mode" in
+        "in-raid")
+            # Blink all mapped snapraid devices
+            for mapping in "${device_mapping[@]}"; do
+                devices_to_blink+=("${mapping#*:}")  # Extract device ID
+            done
+            ;;
+        "not-in-raid")
+            # Find all arcconf devices that are NOT in snapraid using unified data
+            local all_arcconf_devices=()
+            local mapped_arcconf_devices=()
+            
+            # Get all devices from unified data (including unmapped ones)
+            for record in "${unified_array[@]}"; do
+                if [[ "$record" =~ ^([^:]+):([^:]+): ]]; then
+                    local arcconf_id="${BASH_REMATCH[2]}"
+                    if [[ -n "$arcconf_id" && "$arcconf_id" != "no-arcconf-match" ]]; then
+                        all_arcconf_devices+=("$arcconf_id")
+                        # If this record is mapped (not ending with no-arcconf-match), track it
+                        if [[ ! "$record" =~ :no-arcconf-match$ ]]; then
+                            mapped_arcconf_devices+=("$arcconf_id")
+                        fi
+                    fi
+                fi
+            done
+            
+            # Get additional arcconf devices that might not be in snapraid at all
+            if command -v arcconf >/dev/null 2>&1; then
+                local arcconf_data
+                if arcconf_data=$(pooltool::get_arcconf_devices "$controller_id" 2>/dev/null); then
+                    while IFS= read -r line; do
+                        if [[ "$line" =~ ^DEVICE:([^:]+): ]]; then
+                            local device_id="${BASH_REMATCH[1]}"
+                            # Add to all_arcconf_devices if not already present
+                            if [[ ! " ${all_arcconf_devices[*]} " =~ " $device_id " ]]; then
+                                all_arcconf_devices+=("$device_id")
+                            fi
+                        fi
+                    done <<< "$arcconf_data"
+                fi
+            fi
+            
+            # Add devices that are not mapped to snapraid
+            for device_id in "${all_arcconf_devices[@]}"; do
+                if [[ ! " ${mapped_arcconf_devices[*]} " =~ " $device_id " ]]; then
+                    devices_to_blink+=("$device_id")
+                fi
+            done
+            ;;
+        "specific-drives")
+            # Map specific snapraid drive names to device IDs
+            for drive_name in "${specific_drives[@]}"; do
+                local found=false
+                for record in "${unified_array[@]}"; do
+                    # Parse unified mapping: mount_name:arcconf_id:connector:device_slot:snapraid_name:...
+                    if [[ "$record" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*): ]]; then
+                        local snapraid_name="${BASH_REMATCH[5]}"
+                        local arcconf_id="${BASH_REMATCH[2]}"
+                        
+                        if [[ "$snapraid_name" == "$drive_name" ]]; then
+                            devices_to_blink+=("$arcconf_id")
+                            found=true
+                            break
+                        fi
+                    fi
+                done
+                if [[ "$found" == false ]]; then
+                    echo "Warning: Drive '$drive_name' not found in snapraid configuration" >&2
+                fi
+            done
+            ;;
+        "specific-mount-names")
+            # Map mount names (like DRU01, PPU01) to device IDs
+            for mount_name in "${specific_mount_names[@]}"; do
+                local found=false
+                for mapping in "${device_mapping[@]}"; do
+                    local mapped_name="${mapping%:*}"
+                    if [[ "$mapped_name" == "$mount_name" ]]; then
+                        devices_to_blink+=("${mapping#*:}")
+                        found=true
+                        break
+                    fi
+                done
+                if [[ "$found" == false ]]; then
+                    echo "Warning: Mount name '$mount_name' not found in snapraid configuration" >&2
+                fi
+            done
+            ;;
+    esac
+    
+    # Show mapping results
+    if [[ "$verbose" == true || "$dry_run" == true ]]; then
+        echo
+        echo "=== Device Mapping Summary ==="
+        echo "Successfully mapped: ${#device_mapping[@]} devices"
+        echo "Unmapped devices: ${#unmapped_devices[@]} devices"
+        
+        if [[ ${#unmapped_devices[@]} -gt 0 ]]; then
+            echo
+            echo "Unmapped devices:"
+            for unmapped in "${unmapped_devices[@]}"; do
+                IFS=':' read -r name device reason <<< "$unmapped"
+                echo "  - $name ($device): $reason"
+            done
+        fi
+        
+        echo
+        echo "Devices to blink (mode: $blink_mode):"
+        if [[ ${#devices_to_blink[@]} -eq 0 ]]; then
+            echo "  (none)"
+        else
+            for device_id in "${devices_to_blink[@]}"; do
+                # Find the name for this device ID
+                local device_name="unknown"
+                for mapping in "${device_mapping[@]}"; do
+                    if [[ "${mapping#*:}" == "$device_id" ]]; then
+                        device_name="${mapping%:*}"
+                        break
+                    fi
+                done
+                echo "  - arcconf device #$device_id ($device_name)"
+            done
+        fi
+    fi
+    
+    if [[ ${#devices_to_blink[@]} -eq 0 ]]; then
+        echo "No devices to blink with current settings"
+        if [[ "$show_visual" == true ]]; then
+            echo
+            echo "Showing drive bay layout:"
+            # Use new visualization with no blinking devices
+            pooltool::render_drive_grid "PHYSICAL_LAYOUT" "$visual_labels" "" "$use_colors" "${unified_array[@]}"
+        fi
+        return 0
+    fi
+    
+    if [[ "$dry_run" == true ]]; then
+        if [[ "$show_visual" == true ]]; then
+            echo
+            echo "=== Drive Bay Layout (Dry Run) ==="
+            # Convert blinking devices to comma-separated string for new visualization
+            local blinking_devices_str
+            if [[ ${#devices_to_blink[@]} -gt 0 ]]; then
+                blinking_devices_str=$(printf "%s," "${devices_to_blink[@]}")
+                blinking_devices_str="${blinking_devices_str%,}"  # Remove trailing comma
+            else
+                blinking_devices_str=""
+            fi
+            pooltool::render_drive_grid "PHYSICAL_LAYOUT" "$visual_labels" "$blinking_devices_str" "$use_colors" "${unified_array[@]}"
+        fi
+        echo
+        echo "=== Dry Run - No actual blinking performed ==="
+        return 0
+    fi
+    
+    # Phase 3: Implement actual blinking logic
+    echo
+    echo "=== Starting LED Blinking ==="
+    
+    # Validate that we have devices to blink
+    if [[ ${#devices_to_blink[@]} -eq 0 ]]; then
+        echo "No devices to blink with current settings"
+        return 0
+    fi
+    
+    echo "Blinking ${#devices_to_blink[@]} device(s) on controller 1"
+    if [[ -n "$duration" ]]; then
+        echo "Duration: $duration seconds"
+    else
+        echo "Duration: until Ctrl+C (Press Ctrl+C to stop blinking)"
+    fi
+    
+    # Start blinking sequence
+    if [[ "$show_visual" == true ]]; then
+        echo "Starting blinking sequence..."
+    fi
+    echo
+    
+    # Start blinking each device
+    local device_channels=()
+    local device_ids=()
+    local device_names=()
+    
+    # Parse channel and device info for each device to blink
+    for device_id in "${devices_to_blink[@]}"; do
+        # Find the name for this device ID for display
+        local device_name="device #$device_id"
+        for mapping in "${device_mapping[@]}"; do
+            if [[ "${mapping#*:}" == "$device_id" ]]; then
+                device_name="${mapping%:*} (device #$device_id)"
+                break
+            fi
+        done
+        
+        # Extract channel and device ID from arcconf output
+        local channel=""
+        local dev_id=""
+        local current_device=""
+        
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^[[:space:]]*Device[[:space:]]+#([0-9]+) ]]; then
+                current_device="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ Reported[[:space:]]+Channel,Device\(T:L\)[[:space:]]*:[[:space:]]*([0-9]+),([0-9]+) ]]; then
+                if [[ "$current_device" == "$device_id" ]]; then
+                    channel="${BASH_REMATCH[1]}"
+                    dev_id="${BASH_REMATCH[2]}"
+                    break
+                fi
+            fi
+        done <<< "$arcconf_output"
+        
+        if [[ -z "$channel" || -z "$dev_id" ]]; then
+            echo "Warning: Could not find channel/device info for device #$device_id, skipping" >&2
+            continue
+        fi
+        
+        device_channels+=("$channel")
+        device_ids+=("$dev_id")
+        device_names+=("$device_name")
+        
+        echo "Starting blink for $device_name (channel $channel, device $dev_id)..."
+        
+        # Build and execute the identify command
+        local identify_cmd="arcconf IDENTIFY 1 DEVICE $channel $dev_id START"
+        
+        if [[ "$verbose" == true ]]; then
+            echo "  Executing: $identify_cmd"
+        fi
+        
+        # Start blinking
+        if ! $identify_cmd; then
+            echo "Warning: Failed to start blinking for $device_name" >&2
+            continue
+        fi
+    done
+    
+    # Check if any devices actually started blinking
+    if [[ ${#device_channels[@]} -eq 0 ]]; then
+        echo "No devices could be started for blinking"
+        return 1
+    fi
+    
+    # Handle duration-based vs indefinite blinking
+    if [[ -n "$duration" ]]; then
+        if [[ "$show_visual" == true && "$animate" == true ]]; then
+            echo "Blinking for ${duration} seconds with visual layout..."
+            echo
+            # Convert blinking devices to comma-separated string for new visualization
+            local blinking_devices_str
+            if [[ ${#devices_to_blink[@]} -gt 0 ]]; then
+                blinking_devices_str=$(printf "%s," "${devices_to_blink[@]}")
+                blinking_devices_str="${blinking_devices_str%,}"  # Remove trailing comma
+            else
+                blinking_devices_str=""
+            fi
+            pooltool::render_drive_grid "PHYSICAL_LAYOUT" "$visual_labels" "$blinking_devices_str" "$use_colors" "${unified_array[@]}"
+            sleep "$duration"
+        else
+            echo "Blinking for ${duration} seconds..."
+            sleep "$duration"
+        fi
+        
+        echo "Stopping LED blinking..."
+        # Stop all blinking devices
+        for i in "${!device_channels[@]}"; do
+            local channel="${device_channels[$i]}"
+            local dev_id="${device_ids[$i]}"
+            local device_name="${device_names[$i]}"
+            
+            local stop_cmd="arcconf IDENTIFY 1 DEVICE $channel $dev_id STOP"
+            
+            if [[ "$verbose" == true ]]; then
+                echo "  Stopping: $device_name"
+                echo "  Executing: $stop_cmd"
+            fi
+            
+            $stop_cmd 2>/dev/null || echo "Warning: Failed to stop blinking for $device_name" >&2
+        done
+        
+        echo "Blinking completed"
+    else
+        # Setup signal handler for Ctrl+C to stop all devices
+        trap 'echo -e "\n\n=== Stopping LED blinking ==="; for i in "${!device_channels[@]}"; do local channel="${device_channels[$i]}"; local dev_id="${device_ids[$i]}"; local device_name="${device_names[$i]}"; echo "Stopping $device_name..."; arcconf IDENTIFY 1 DEVICE $channel $dev_id STOP 2>/dev/null || true; done; echo "All LED blinking stopped"; exit 0' INT
+        
+        if [[ "$show_visual" == true && "$animate" == true ]]; then
+            echo "LED blinking started for ${#device_channels[@]} device(s) with visual layout"
+            echo "Press Ctrl+C to stop all blinking"
+            echo
+            # Convert blinking devices to comma-separated string for new visualization
+            local blinking_devices_str
+            if [[ ${#devices_to_blink[@]} -gt 0 ]]; then
+                blinking_devices_str=$(printf "%s," "${devices_to_blink[@]}")
+                blinking_devices_str="${blinking_devices_str%,}"  # Remove trailing comma
+            else
+                blinking_devices_str=""
+            fi
+            pooltool::render_drive_grid "PHYSICAL_LAYOUT" "$visual_labels" "$blinking_devices_str" "$use_colors" "${unified_array[@]}"
+            
+            # Wait indefinitely until Ctrl+C  
+            while true; do
+                sleep 5
+                if [[ "$verbose" == true ]]; then
+                    echo -n "."  # Progress indicator
+                fi
+            done
+        else
+            echo "LED blinking started for ${#device_channels[@]} device(s)"
+            echo "Press Ctrl+C to stop all blinking"
+            echo
+            
+            # Wait indefinitely until Ctrl+C
+            while true; do
+                sleep 5
+                if [[ "$verbose" == true ]]; then
+                    echo -n "."  # Progress indicator
+                fi
+            done
+        fi
+    fi
+    
+    return 0
+}

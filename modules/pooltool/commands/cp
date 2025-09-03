@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+#NAMESPACE=pooltool::commands
+
+dependencies::depends "pooltool/pathtools"
+dependencies::depends "pooltool/raidtools"
+dependencies::depends "pooltool/commands/find"
+dependencies::register_module "pooltool/commands/cp"
+
+function cp {
+  local sources=()
+  local target
+  
+  if [[ $# -le 1 ]]; then
+    echo "We need at least two arguments"
+    this::print_help
+    exit 1
+  fi
+  
+  while [[ $# -gt 0 ]]; do
+    local _key="$1"
+    case "${_key}" in
+    -h|--help)
+      this::print_help
+      break
+      ;;
+    *)
+      if [[ $# -eq 1 ]]; then
+        target="${_key}"
+      else
+        if [[ ! -e "${_key}" ]]; then
+          echo "Source item does not exist: $1"
+          this::print_help
+          exit 1
+        fi
+        sources+=( "$(pooltool::abspath "${_key}")" )
+      fi
+    esac
+    shift
+  done
+  
+  if [[ ${#sources[@]} -lt 1 ]]; then
+    echo "Need at least one source item"
+    this::print_help
+    exit 1
+  fi
+  if [[ -z ${target:+x} ]]; then
+    echo "Need a target destination"
+    this::print_help
+    exit 1
+  fi
+  if ! $(pooltool::is_raid_path "${target}"); then
+    echo "Target destination must be in the RAID: \"${RAID_LOCATION}\""
+    this::print_help
+    exit 1
+  fi
+  
+  local source
+  local raid_dest="$(pooltool::abs_target "${target}")"
+  if [[ -e "${raid_dest}" ]]; then
+    local is_conflict=false
+    if [[ "${target}" != *"/" ]]; then
+      if ! is_empty_dir "${raid_dest}"; then
+        is_conflict=true
+      fi
+    elif [[ -f "${raid_dest}" ]]; then
+      is_conflict=true
+    fi
+    
+    if [[ "${is_conflict}" == true ]]; then
+      echo "File exists or Dir not empty at \"${raid_dest}\""
+      read -p "would you like to overwrite?[y/N]: " -n 1 -r
+      echo
+      if [[ $REPLY =~ ^[Yy]$ ]]; then
+        rm -r "${raid_dest}"
+      else
+        exit 1
+      fi
+    fi
+  fi
+  
+  local _dru_regex='^'"${DRU_MOUNT_POINT}/DRU"'[[:digit:]]+/'
+  for source in "${sources[@]}"; do
+    local destinations=()
+    local flags="-a"
+    
+    local files_array="$(pooltool::files_from_paths "${source}")"
+    local files
+    declare -a files="$(echo "${files_array}" | sed "s/^[^(]*// ; s/'$//")"
+    
+    if $(pooltool::is_raid_path "${source}"); then
+      local file
+      for file in "${files[@]}"; do
+        local rel_file="${file#${source}}"
+        local true_file="$(pooltool::commands::find "${file}")"
+        local dru_prefix
+        if [[ "${true_file}" =~ ${_dru_regex} ]]; then
+          dru_prefix="${BASH_REMATCH[0]}"
+        fi
+        
+        local src_basename=""
+        if [[ "${source}" != *"/" ]]; then
+          src_basename="$(basename "${source}")"
+        fi
+        destinations+=( "$(pooltool::construct_path "${dru_prefix}" "${raid_dest#${RAID_LOCATION}}" "${src_basename}" "${rel_file}")" )
+      done
+
+      # Hardlink cp
+      flags="${flags}l"
+    else
+      destinations+=( "${files[@]}" )
+    fi
+    
+    for (( i = 0; i < ${#destinations[@]}; i++ )); do
+      local destination="${destinations[${i}]}"
+      local file="$(pooltool::commands::find "${files[${i}]}")"
+      # echo "${destination}"
+    
+      mkdir -p "$(dirname "${destination}")"
+   
+      echo "=> cp ${flags} \"${file}\" \"${destination}\""
+      cp ${flags} "${file}" "${destination}"
+    done
+  done
+}

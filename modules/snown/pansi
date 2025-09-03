@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+#NAMESPACE=snown
+
+dependencies::register_module "snown/pansi"
+
+function pansi {
+  if ! command -v pansi &>/dev/null; then
+    local tmp_pansi="$(mktemp -t pansi.XXX)"
+    curl -fsSL -o "${tmp_pansi}" "https://raw.githubusercontent.com/snown/pansi/master/pansi"
+    source "${tmp_pansi}"
+  fi
+  
+  pansi "$@"
+}

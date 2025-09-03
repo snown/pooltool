@@ -1,0 +1,21 @@
+#!/usr/bin/env 
+#NAMESPACE=snown
+
+dependencies::register_module "snown/script_sudo"
+
+# Requests Sudo priveledges if not already granted, and maintains them for the
+#   rest of the script
+#-------------------------------------------------------------------------------
+function sudo {
+  local SUDO_IS_ACTIVE
+  SUDO_IS_ACTIVE=$(sudo -n uptime 2>&1|grep "load"|wc -l)
+  if [[ ${SUDO_IS_ACTIVE} -le 0 ]]; then
+    # Ask for the administrator password upfront
+    sudo -v
+
+    # Keep-alive: update existing `sudo` time stamp until `.osx` has finished
+    while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
+  fi
+  
+  sudo "$@"
+}

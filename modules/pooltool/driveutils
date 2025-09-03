@@ -1,0 +1,489 @@
+#!/usr/bin/env bash
+#NAMESPACE=pooltool
+
+dependencies::register_module "pooltool/driveutils"
+
+# Request sudo privileges if not already granted
+#-------------------------------------------------------------------------------
+function request_sudo {
+    local sudo_is_active
+    sudo_is_active=$(sudo -n uptime 2>&1 | grep "load" | wc -l)
+    
+    if [[ ${sudo_is_active} -le 0 ]]; then
+        echo "Requesting sudo privileges for arcconf..." >&2
+        # Ask for the administrator password upfront
+        if ! sudo -v; then
+            echo "Error: Failed to obtain sudo privileges" >&2
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Get arcconf device information with physical layout details
+#-------------------------------------------------------------------------------
+function get_arcconf_devices {
+    local controller="${1:-1}"  # Default to controller 1
+    local arcconf_devices=()
+    
+    # First check if any controllers exist (arcconf wrapper handles sudo internally)
+    local controller_list
+    if ! controller_list=$(arcconf LIST 2>/dev/null); then
+        echo "Error: Failed to run arcconf LIST command" >&2
+        return 1
+    fi
+    
+    # Check if any controllers were found
+    if echo "$controller_list" | grep -q "Controllers found: 0"; then
+        echo "Warning: No RAID controllers found by arcconf" >&2
+        echo "This system may not have supported RAID hardware" >&2
+        # Return empty but successful - this allows graceful fallback
+        return 0
+    fi
+    
+    # Get arcconf output (wrapper handles sudo internally)
+    local arcconf_output
+    if ! arcconf_output=$(arcconf GETCONFIG "$controller" 2>/dev/null); then
+        echo "Error: Failed to get arcconf device information for controller $controller" >&2
+        echo "Please ensure arcconf is working and you have proper permissions" >&2
+        return 1
+    fi
+    
+    # Parse arcconf output for device information
+    local current_device=""
+    local current_connector=""
+    local current_device_slot=""
+    local current_wwn=""
+    local current_serial=""
+    local current_channel=""
+    local current_device_num=""
+    local current_model=""
+    
+    while IFS= read -r line; do
+        # Extract device number
+        if [[ "$line" =~ ^[[:space:]]*Device[[:space:]]+#([0-9]+) ]]; then
+            # Save previous device if we have complete info
+            if [[ -n "$current_device" && -n "$current_connector" && -n "$current_device_slot" ]]; then
+                local device_record="$current_device:$current_connector:$current_device_slot:${current_wwn:-}:${current_serial:-}:${current_channel:-}:${current_device_num:-}:${current_model:-}"
+                arcconf_devices+=("$device_record")
+            fi
+            
+            # Reset for new device
+            current_device="${BASH_REMATCH[1]}"
+            current_connector=""
+            current_device_slot=""
+            current_wwn=""
+            current_serial=""
+            current_channel=""
+            current_device_num=""
+            current_model=""
+            
+        # Extract connector and device slot from Reported Location
+        elif [[ "$line" =~ Reported[[:space:]]+Location[[:space:]]*:[[:space:]]*Connector[[:space:]]+([0-9]+),[[:space:]]*Device[[:space:]]+([0-9]+) ]]; then
+            current_connector="${BASH_REMATCH[1]}"
+            current_device_slot="${BASH_REMATCH[2]}"
+            
+        # Extract WWN
+        elif [[ "$line" =~ World-wide[[:space:]]+name[[:space:]]*:[[:space:]]*([A-F0-9]+) ]]; then
+            current_wwn="${BASH_REMATCH[1]}"
+            
+        # Extract serial number
+        elif [[ "$line" =~ Serial[[:space:]]+number[[:space:]]*:[[:space:]]*([^[:space:]]+) ]]; then
+            current_serial="${BASH_REMATCH[1]}"
+            
+        # Extract channel and device from Reported Channel,Device
+        elif [[ "$line" =~ Reported[[:space:]]+Channel,Device\(T:L\)[[:space:]]*:[[:space:]]*([0-9]+),([0-9]+) ]]; then
+            current_channel="${BASH_REMATCH[1]}"
+            current_device_num="${BASH_REMATCH[2]}"
+            
+        # Extract model name
+        elif [[ "$line" =~ Model[[:space:]]*:[[:space:]]*(.+)$ ]]; then
+            current_model="${BASH_REMATCH[1]// /}"  # Remove spaces
+        fi
+    done <<< "$arcconf_output"
+    
+    # Save the last device
+    if [[ -n "$current_device" && -n "$current_connector" && -n "$current_device_slot" ]]; then
+        local device_record="$current_device:$current_connector:$current_device_slot:${current_wwn:-}:${current_serial:-}:${current_channel:-}:${current_device_num:-}:${current_model:-}"
+        arcconf_devices+=("$device_record")
+    fi
+    
+    # Output the results
+    printf '%s\n' "${arcconf_devices[@]}"
+}
+
+# Get snapraid device information  
+#-------------------------------------------------------------------------------
+function get_snapraid_devices {
+    local snapraid_devices=()
+    
+    # Call snapraid devices directly instead of using module
+    local snapraid_output
+    if ! snapraid_output=$(snapraid devices 2>/dev/null); then
+        echo "Error: Failed to get snapraid device information" >&2
+        echo "Please ensure snapraid is configured and accessible" >&2
+        return 1
+    fi
+    
+    # Parse snapraid devices output
+    while IFS= read -r line; do
+        if [[ -n "$line" && "$line" != "WARNING!"* ]]; then
+            # Parse snapraid device line: "8:16    /dev/sdb        8:17    /dev/sdb1       DRU01"
+            local parts=($line)
+            if [[ ${#parts[@]} -ge 5 ]]; then
+                local device_path="${parts[1]}"      # /dev/sdb
+                local partition_path="${parts[3]}"   # /dev/sdb1  
+                local name_field="${parts[4]}"       # DRU01 or parity or 2-parity
+                
+                local mount_name=""
+                local snapraid_name=""
+                
+                # Check if this is a parity drive (snapraid name in field 5)
+                if [[ "$name_field" == "parity" ]]; then
+                    mount_name="PPU01"
+                    snapraid_name="parity"
+                elif [[ "$name_field" =~ ^([0-9]+)-parity$ ]]; then
+                    # 2-parity, 3-parity, etc.
+                    local parity_num="${BASH_REMATCH[1]}"
+                    mount_name="PPU$(printf "%02d" $parity_num)"  # 2-parity -> PPU02, 3-parity -> PPU03
+                    snapraid_name="$name_field"
+                elif [[ "$name_field" =~ ^DRU([0-9]+)$ ]]; then
+                    # Data drives: DRU01, DRU02, etc.
+                    mount_name="$name_field"
+                    local data_num="${BASH_REMATCH[1]}"
+                    snapraid_name="data${data_num#0}"  # Remove leading zero: DRU01 -> data1
+                else
+                    # Unknown format - use as-is
+                    mount_name="$name_field"
+                    snapraid_name="$name_field"
+                fi
+                
+                local device_record="$mount_name:$snapraid_name:$device_path:$partition_path"
+                snapraid_devices+=("$device_record")
+            fi
+        fi
+    done <<< "$snapraid_output"
+    
+    # Output the results
+    printf '%s\n' "${snapraid_devices[@]}"
+}
+
+# Get system device information using lsblk
+#-------------------------------------------------------------------------------
+function get_system_devices {
+    local device_paths=("$@")
+    local system_devices=()
+    
+    # Process each device path
+    for device_path in "${device_paths[@]}"; do
+        # Get device information from lsblk
+        local wwn serial model size
+        
+        # Get WWN
+        wwn=$(lsblk -n -o WWN "$device_path" 2>/dev/null | head -1 | tr -d ' ' || echo "")
+        
+        # Get serial number
+        serial=$(lsblk -n -o SERIAL "$device_path" 2>/dev/null | head -1 | tr -d ' ' || echo "")
+        
+        # Get model
+        model=$(lsblk -n -o MODEL "$device_path" 2>/dev/null | head -1 | tr -d ' ' || echo "")
+        
+        # Get size
+        size=$(lsblk -n -o SIZE "$device_path" 2>/dev/null | head -1 | tr -d ' ' || echo "")
+        
+        # Normalize WWN format (remove 0x prefix if present)
+        if [[ "$wwn" =~ ^0x([A-F0-9]+)$ ]]; then
+            wwn="${BASH_REMATCH[1]^^}"  # Remove 0x and convert to uppercase
+        elif [[ -n "$wwn" ]]; then
+            wwn="${wwn^^}"  # Convert to uppercase
+        fi
+        
+        local device_record="$device_path:${wwn:-}:${serial:-}:${model:-}:${size:-}"
+        system_devices+=("$device_record")
+    done
+    
+    # Output the results
+    printf '%s\n' "${system_devices[@]}"
+}
+
+# Create unified device mapping across all systems
+#-------------------------------------------------------------------------------
+function create_unified_mapping {
+    local controller="${1:-1}"
+    local unified_mapping=()
+    local unmapped_devices=()
+    
+    # Get data from all three systems
+    local arcconf_devices snapraid_devices system_devices
+    
+    # Get arcconf device data
+    if ! arcconf_devices=$(pooltool::get_arcconf_devices "$controller"); then
+        echo "Warning: Failed to get arcconf device information" >&2
+        arcconf_devices=()
+    else
+        readarray -t arcconf_devices <<< "$arcconf_devices"
+    fi
+    
+    # Get snapraid device data
+    if ! snapraid_devices=$(pooltool::get_snapraid_devices); then
+        echo "Warning: Failed to get snapraid device information" >&2
+        snapraid_devices=()
+    else
+        readarray -t snapraid_devices <<< "$snapraid_devices"
+    fi
+    
+    # Extract device paths for system lookup
+    local device_paths=()
+    for snapraid_record in "${snapraid_devices[@]}"; do
+        if [[ "$snapraid_record" =~ ^[^:]+:[^:]*:([^:]+): ]]; then
+            device_paths+=("${BASH_REMATCH[1]}")
+        fi
+    done
+    
+    # Get system device data
+    if [[ ${#device_paths[@]} -gt 0 ]]; then
+        if ! system_devices=$(pooltool::get_system_devices "${device_paths[@]}"); then
+            echo "Warning: Failed to get system device information" >&2
+            system_devices=()
+        else
+            readarray -t system_devices <<< "$system_devices"
+        fi
+    fi
+    
+    # Create lookup tables
+    local -A arcconf_by_wwn arcconf_by_serial
+    local -A system_by_path
+    
+    # Index arcconf devices by WWN and serial
+    for arcconf_record in "${arcconf_devices[@]}"; do
+        if [[ "$arcconf_record" =~ ^([^:]+):([^:]+):([^:]+):([^:]*):([^:]*): ]]; then
+            local device_id="${BASH_REMATCH[1]}"
+            local wwn="${BASH_REMATCH[4]}"
+            local serial="${BASH_REMATCH[5]}"
+            
+            if [[ -n "$wwn" ]]; then
+                arcconf_by_wwn["$wwn"]="$arcconf_record"
+            fi
+            if [[ -n "$serial" ]]; then
+                arcconf_by_serial["$serial"]="$arcconf_record"
+            fi
+        fi
+    done
+    
+    # Index system devices by path
+    for system_record in "${system_devices[@]}"; do
+        if [[ "$system_record" =~ ^([^:]+): ]]; then
+            local device_path="${BASH_REMATCH[1]}"
+            system_by_path["$device_path"]="$system_record"
+        fi
+    done
+    
+    # Match snapraid devices to arcconf devices
+    local -A arcconf_matched  # Track which arcconf devices have been matched
+    
+    for snapraid_record in "${snapraid_devices[@]}"; do
+        if [[ "$snapraid_record" =~ ^([^:]+):([^:]*):([^:]+):([^:]+)$ ]]; then
+            local mount_name="${BASH_REMATCH[1]}"
+            local snapraid_name="${BASH_REMATCH[2]}"
+            local device_path="${BASH_REMATCH[3]}"
+            local partition_path="${BASH_REMATCH[4]}"
+            
+            # Get system device info
+            local system_record="${system_by_path[$device_path]:-}"
+            local system_wwn="" system_serial="" system_model="" system_size=""
+            
+            if [[ "$system_record" =~ ^[^:]+:([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+                system_wwn="${BASH_REMATCH[1]}"
+                system_serial="${BASH_REMATCH[2]}"
+                system_model="${BASH_REMATCH[3]}"
+                system_size="${BASH_REMATCH[4]}"
+            fi
+            
+            # Try to match with arcconf device
+            local arcconf_record=""
+            local match_method=""
+            
+            # First try WWN matching
+            if [[ -n "$system_wwn" && -n "${arcconf_by_wwn[$system_wwn]:-}" ]]; then
+                arcconf_record="${arcconf_by_wwn[$system_wwn]}"
+                match_method="wwn"
+            # Then try serial matching
+            elif [[ -n "$system_serial" && -n "${arcconf_by_serial[$system_serial]:-}" ]]; then
+                arcconf_record="${arcconf_by_serial[$system_serial]}"
+                match_method="serial"
+            fi
+            
+            if [[ -n "$arcconf_record" ]]; then
+                # Parse arcconf record
+                if [[ "$arcconf_record" =~ ^([^:]+):([^:]+):([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+                    local arcconf_id="${BASH_REMATCH[1]}"
+                    local connector="${BASH_REMATCH[2]}"
+                    local device_slot="${BASH_REMATCH[3]}"
+                    local arcconf_wwn="${BASH_REMATCH[4]}"
+                    local arcconf_serial="${BASH_REMATCH[5]}"
+                    local channel="${BASH_REMATCH[6]}"
+                    local device_num="${BASH_REMATCH[7]}"
+                    local arcconf_model="${BASH_REMATCH[8]}"
+                    
+                    # Create unified record
+                    local unified_record="$mount_name:$arcconf_id:$connector:$device_slot:$snapraid_name:$device_path:${system_wwn:-$arcconf_wwn}:${system_serial:-$arcconf_serial}:$channel:$device_num:${system_model:-$arcconf_model}:$system_size:$match_method"
+                    unified_mapping+=("$unified_record")
+                    
+                    # Mark this arcconf device as matched
+                    arcconf_matched["$arcconf_id"]=1
+                fi
+            else
+                # Device couldn't be mapped to arcconf
+                local reason="no-arcconf-match"
+                if [[ -z "$system_wwn" && -z "$system_serial" ]]; then
+                    reason="no-identifiers"
+                fi
+                unmapped_devices+=("$mount_name:$device_path:$reason")
+            fi
+        fi
+    done
+    
+    # Add arcconf-only drives (drives detected by arcconf but not in snapraid)
+    for arcconf_record in "${arcconf_devices[@]}"; do
+        if [[ "$arcconf_record" =~ ^([^:]+):([^:]+):([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+            local arcconf_id="${BASH_REMATCH[1]}"
+            local connector="${BASH_REMATCH[2]}"
+            local device_slot="${BASH_REMATCH[3]}"
+            local arcconf_wwn="${BASH_REMATCH[4]}"
+            local arcconf_serial="${BASH_REMATCH[5]}"
+            local channel="${BASH_REMATCH[6]}"
+            local device_num="${BASH_REMATCH[7]}"
+            local arcconf_model="${BASH_REMATCH[8]}"
+            
+            # Only include if this device wasn't already matched to a snapraid drive
+            if [[ -z "${arcconf_matched[$arcconf_id]}" ]]; then
+                # Create descriptive label for unallocated drive
+                local drive_label="UNALLOC"
+                if [[ "$arcconf_model" =~ ST14000 ]]; then
+                    drive_label="NEW-14T"
+                elif [[ "$arcconf_model" =~ ST12000 ]]; then
+                    drive_label="NEW-12T"
+                elif [[ "$arcconf_model" =~ ST8000 ]]; then
+                    drive_label="NEW-8T"
+                elif [[ "$arcconf_model" =~ ST4000 ]]; then
+                    drive_label="NEW-4T"
+                elif [[ "$arcconf_model" =~ WUH721414 ]]; then
+                    drive_label="NEW-14T"
+                elif [[ "$arcconf_model" =~ OOS12000 ]]; then
+                    drive_label="NEW-12T"
+                fi
+                
+                # Create unified record for unallocated drive
+                local unified_record="$drive_label:$arcconf_id:$connector:$device_slot:NONE:NONE:$arcconf_wwn:$arcconf_serial:$channel:$device_num:$arcconf_model:UNKNOWN:unallocated"
+                unified_mapping+=("$unified_record")
+            fi
+        fi
+    done
+    
+    # Output results
+    if [[ ${#unified_mapping[@]} -gt 0 ]]; then
+        printf '%s\n' "${unified_mapping[@]}"
+    fi
+    
+    # Output unmapped devices to stderr for reporting
+    if [[ ${#unmapped_devices[@]} -gt 0 ]]; then
+        echo "UNMAPPED_DEVICES:" >&2
+        printf '%s\n' "${unmapped_devices[@]}" >&2
+    fi
+}
+
+# Get physical layout mapping from unified device data
+#-------------------------------------------------------------------------------
+function get_physical_layout {
+    local unified_data=("$@")
+    local -A physical_layout
+    local -A layout_status
+    
+    # Initialize empty 6x4 grid (connectors 0-5, devices 0-3)
+    for connector in {0..5}; do
+        for device in {0..3}; do
+            local key="${connector}_${device}"
+            physical_layout["$key"]="EMPTY"
+            layout_status["$key"]="empty"
+        done
+    done
+    
+    # Populate grid with actual device data
+    for record in "${unified_data[@]}"; do
+        if [[ "$record" =~ ^([^:]+):([^:]+):([^:]+):([^:]+): ]]; then
+            local mount_name="${BASH_REMATCH[1]}"
+            local arcconf_id="${BASH_REMATCH[2]}"
+            local connector="${BASH_REMATCH[3]}"
+            local device_slot="${BASH_REMATCH[4]}"
+            
+            local key="${connector}_${device_slot}"
+            # Check the status from the record ending
+            if [[ "$record" =~ :unallocated$ ]]; then
+                physical_layout["$key"]="$mount_name"
+                layout_status["$key"]="unallocated"
+            else
+                physical_layout["$key"]="$mount_name"
+                layout_status["$key"]="available"
+            fi
+        fi
+    done
+    
+    # Output physical layout as 6x4 grid
+    echo "PHYSICAL_LAYOUT:"
+    for connector in {0..5}; do
+        local row_data=""
+        for device in {3..0}; do  # Right to left (3,2,1,0)
+            local key="${connector}_${device}"
+            local drive="${physical_layout[$key]}"
+            local status="${layout_status[$key]}"
+            
+            if [[ -n "$row_data" ]]; then
+                row_data+=" "
+            fi
+            row_data+="$drive:$status"
+        done
+        echo "$row_data"
+    done
+}
+
+# Debug function to show all collected data
+#-------------------------------------------------------------------------------
+function debug_device_data {
+    local controller="${1:-1}"
+    
+    echo "=== Debug: Drive Utilities Data Collection ===" >&2
+    echo >&2
+    
+    echo "--- Arcconf Devices ---" >&2
+    if arcconf_devices=$(pooltool::get_arcconf_devices "$controller" 2>&1); then
+        echo "$arcconf_devices" >&2
+    else
+        echo "Failed to get arcconf devices" >&2
+    fi
+    echo >&2
+    
+    echo "--- Snapraid Devices ---" >&2
+    if snapraid_devices=$(pooltool::get_snapraid_devices 2>&1); then
+        echo "$snapraid_devices" >&2
+    else
+        echo "Failed to get snapraid devices" >&2
+    fi
+    echo >&2
+    
+    echo "--- Unified Mapping ---" >&2
+    if unified_mapping=$(pooltool::create_unified_mapping "$controller" 2>&1); then
+        echo "$unified_mapping" >&2
+    else
+        echo "Failed to create unified mapping" >&2
+    fi
+    echo >&2
+    
+    echo "--- Physical Layout ---" >&2
+    if [[ -n "${unified_mapping:-}" ]]; then
+        readarray -t mapping_array <<< "$unified_mapping"
+        pooltool::get_physical_layout "${mapping_array[@]}" >&2
+    else
+        echo "No unified mapping available for physical layout" >&2
+    fi
+    echo >&2
+}
