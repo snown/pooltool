@@ -449,15 +449,15 @@ function render_drive_grid_with_capacity {
     fi
     
     # Calculate dimensions based on capacity display
-    local max_label_length=10  # Base label length
-    local cell_width=16         # Increased width for capacity bars
-    local total_width=72        # Wider total layout
-    local box_width=80          # Wider box
+    local max_label_length=8   # Standard label length like the original  
+    local cell_width=14        # Slightly wider for capacity bars
+    local total_width=64       # More reasonable total width
+    local box_width=68         # More reasonable box width
     
     if [[ "$show_capacity" == "true" ]]; then
-        cell_width=18
-        total_width=80
-        box_width=88
+        cell_width=16          # Extra space for capacity bars
+        total_width=68
+        box_width=72
     fi
     
     # Create layout mapping
@@ -558,24 +558,26 @@ function render_drive_grid_with_capacity {
             local device_record="${device_by_position[$position_key]}"
             
             if [[ -n "$device_name" && "$device_name" != "N/A" ]]; then
-                # Format device label
-                local label
-                label=$(pooltool::format_device_label "$device_record" "$label_type")
-                
-                # Determine status indicator based on device status and blinking
-                local status_indicator
-                if [[ -n "$blinking_devices" && "$blinking_devices" =~ (^|,)${device_name}(,|$) ]]; then
-                    status_indicator="$LED_ON"
-                elif [[ "$device_status" == "unallocated" ]]; then
-                    status_indicator="$LED_UNALLOCATED"
-                else
-                    status_indicator="$LED_OFF"
+                # For formatting, we need either the device record or a dummy record for empty/unallocated
+                local format_record="$device_record"
+                if [[ -z "$format_record" ]]; then
+                    # Create a dummy record for empty or unallocated devices
+                    format_record="$device_name::::::::::::::"
                 fi
                 
-                # Build cell content
-                local cell_content="[${label} ${status_indicator}]"
+                # Determine device status for the formatter
+                local format_status="available"
+                if [[ -n "$blinking_devices" && "$blinking_devices" =~ (^|,)${device_name}(,|$) ]]; then
+                    format_status="blinking"
+                elif [[ "$device_status" == "unallocated" ]]; then
+                    format_status="unallocated"
+                fi
                 
-                # Add capacity bar if enabled
+                # Get the formatted cell using the standard formatter
+                local cell_content
+                cell_content=$(pooltool::format_device_label "$format_record" "$label_type" "$max_label_length" "$format_status")
+                
+                # Add capacity bar if enabled and available - insert it inside the brackets
                 if [[ "$show_capacity" == "true" && -n "${capacity_info[$device_name]}" ]]; then
                     local cap_info="${capacity_info[$device_name]}"
                     if [[ "$cap_info" =~ ^([^:]+):([^:]+)$ ]]; then
@@ -583,8 +585,8 @@ function render_drive_grid_with_capacity {
                         local use_percent="${BASH_REMATCH[2]}"
                         
                         if [[ "$mount_status" == "mounted" ]]; then
-                            # Generate simple usage bar
-                            local bar_width=6
+                            # Generate compact usage bar (4 characters)
+                            local bar_width=4
                             local filled_blocks=$((use_percent * bar_width / 100))
                             local empty_blocks=$((bar_width - filled_blocks))
                             
@@ -602,29 +604,28 @@ function render_drive_grid_with_capacity {
                                 fi
                             fi
                             
-                            # Build the bar
-                            local usage_bar=""
+                            # Build the compact bar
+                            local capacity_bar=""
                             for ((i=0; i<filled_blocks; i++)); do
-                                usage_bar+="▓"
+                                capacity_bar+="▓"
                             done
                             for ((i=0; i<empty_blocks; i++)); do
-                                usage_bar+="░"
+                                capacity_bar+="░"
                             done
+                            capacity_bar="${bar_color}${capacity_bar}${reset_color}"
                             
-                            cell_content="${cell_content} ${bar_color}${usage_bar}${reset_color}"
+                            # Insert capacity bar into the cell: [DRU03   ●] becomes [DRU03 ▓▓▓░ ●]
+                            cell_content=$(echo "$cell_content" | sed "s/   / $capacity_bar /")
                         fi
                     fi
                 fi
-                
-                row_parts+=("$cell_content")
             else
-                # Empty bay
-                local empty_content="[-------]"
-                if [[ "$show_capacity" == "true" ]]; then
-                    empty_content="${empty_content}      "
-                fi
-                row_parts+=("$empty_content")
+                # Handle empty bay using standard formatter
+                local empty_record="EMPTY::::::::::::::"
+                cell_content=$(pooltool::format_device_label "$empty_record" "$label_type" "$max_label_length" "empty")
             fi
+            
+            row_parts+=("$cell_content")
         done
         
         # Print row
@@ -638,12 +639,12 @@ function render_drive_grid_with_capacity {
     
     # Footer with legend
     echo "├${border_line}┤"
-    echo "│  ● = Drive present    + = Unallocated drive    - = Empty bay      │"
+    echo "│  ● = Drive present   + = Unallocated   - = Empty bay           │"
     
     if [[ "$show_capacity" == "true" ]]; then
-        echo "│  Usage bars: ▓▓▓░░░ (Green <70%, Yellow 70-85%, Red >85%)        │"
+        echo "│  Capacity: ▓▓▓░ (Green <70%, Yellow 70-85%, Red >85%)       │"
     fi
     
-    echo "│  DRU = Data drive, PPU = Parity drive                              │"
+    echo "│  DRU = Data drive, PPU = Parity drive                      │"
     echo "└${border_line}┘"
 }
