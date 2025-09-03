@@ -1,9 +1,209 @@
 #!/usr/bin/env bash
-#NAMESPACE=pooltool
+NAMESPACE=pooltool
 
 dependencies::depends "pooltool/driveutils"
 dependencies::depends "pooltool/capacityutils"
+dependencies::depends "pooltool/healthutils"
 dependencies::register_module "pooltool/drivevisualizer"
+
+# Generate system overview header with array status and health summary
+#-------------------------------------------------------------------------------
+function generate_system_overview_header {
+    local unified_device_data=("$@")
+    local use_colors="${1:-true}"
+    
+    # Initialize color scheme
+    local GREEN="" YELLOW="" RED="" BLUE="" RESET=""
+    if [[ "$use_colors" == "true" ]]; then
+        GREEN=$'\033[32m'
+        YELLOW=$'\033[33m' 
+        RED=$'\033[91m'
+        BLUE=$'\033[36m'
+        RESET=$'\033[0m'
+    fi
+    
+    # Collect system statistics
+    local total_drives=0
+    local allocated_drives=0
+    local unallocated_drives=0
+    local good_health=0
+    local warning_health=0
+    local critical_health=0
+    local total_capacity=0
+    local total_used=0
+    local min_temp=999
+    local max_temp=0
+    local temp_readings=0
+    local parity_drives=0
+    local data_drives=0
+    
+    # Get health data efficiently for all drives
+    local health_results
+    if health_results=$(pooltool::get_all_health_info_efficient 1 "${unified_device_data[@]}" 2>/dev/null); then
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*):([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]+):([^:]+):([^:]+):([^:]+)$ ]]; then
+                local mount_name="${BASH_REMATCH[1]}"
+                local health_status="${BASH_REMATCH[14]}"
+                local temperature="${BASH_REMATCH[15]}"
+                local snapraid_name="${BASH_REMATCH[5]}"
+                
+                total_drives=$((total_drives + 1))
+                
+                # Count drive types
+                if [[ "$mount_name" =~ ^PPU ]]; then
+                    parity_drives=$((parity_drives + 1))
+                elif [[ "$mount_name" =~ ^DRU ]]; then
+                    data_drives=$((data_drives + 1))
+                fi
+                
+                # Count allocation status
+                if [[ "$mount_name" =~ ^(NEW-|UNALLOC) ]]; then
+                    unallocated_drives=$((unallocated_drives + 1))
+                else
+                    allocated_drives=$((allocated_drives + 1))
+                fi
+                
+                # Count health status
+                case "$health_status" in
+                    "good") good_health=$((good_health + 1)) ;;
+                    "warning") warning_health=$((warning_health + 1)) ;;
+                    "critical") critical_health=$((critical_health + 1)) ;;
+                esac
+                
+                # Track temperature
+                if [[ "$temperature" =~ ^[0-9]+$ && $temperature -gt 0 ]]; then
+                    temp_readings=$((temp_readings + 1))
+                    if [[ $temperature -lt $min_temp ]]; then
+                        min_temp=$temperature
+                    fi
+                    if [[ $temperature -gt $max_temp ]]; then
+                        max_temp=$temperature
+                    fi
+                fi
+                
+                # Get capacity data for allocated drives
+                if [[ "$mount_name" =~ ^(DRU|PPU) ]]; then
+                    local expected_mount="/mnt/${mount_name}"
+                    if mountpoint -q "$expected_mount" 2>/dev/null; then
+                        local df_output
+                        if df_output=$(df -BG "$expected_mount" 2>/dev/null | tail -n1); then
+                            local size_gb used_gb
+                            size_gb=$(echo "$df_output" | awk '{print $2}' | tr -d 'G')
+                            used_gb=$(echo "$df_output" | awk '{print $3}' | tr -d 'G')
+                            if [[ "$size_gb" =~ ^[0-9]+$ && "$used_gb" =~ ^[0-9]+$ ]]; then
+                                total_capacity=$((total_capacity + size_gb))
+                                total_used=$((total_used + used_gb))
+                            fi
+                        fi
+                    fi
+                fi
+            fi
+        done <<< "$health_results"
+    fi
+    
+    # Get SnapRAID status
+    local snapraid_status="Unknown"
+    local last_sync="Never"
+    if command -v snapraid >/dev/null 2>&1; then
+        # Try to get SnapRAID status (this might need adjustment based on actual snapraid output)
+        if snapraid status >/dev/null 2>&1; then
+            snapraid_status="${GREEN}Healthy${RESET}"
+        else
+            snapraid_status="${YELLOW}Check Needed${RESET}"
+        fi
+        
+        # Try to find last sync time (this is a simplified approach)
+        if [[ -f /var/log/snapraid.log ]]; then
+            last_sync=$(grep -i "sync completed" /var/log/snapraid.log 2>/dev/null | tail -1 | awk '{print $1 " " $2}' 2>/dev/null || echo "Unknown")
+        fi
+    fi
+    
+    # Calculate percentages and formatting
+    local usage_percent=0
+    if [[ $total_capacity -gt 0 ]]; then
+        usage_percent=$(( (total_used * 100) / total_capacity ))
+    fi
+    
+    local avg_temp=0
+    if [[ $temp_readings -gt 0 ]]; then
+        # We'll approximate average as midpoint for now
+        avg_temp=$(( (min_temp + max_temp) / 2 ))
+    fi
+    
+    # Format capacity display
+    local capacity_display
+    if [[ $total_capacity -ge 1000 ]]; then
+        local total_tb=$((total_capacity / 1000))
+        local used_tb=$((total_used / 1000))
+        capacity_display="${used_tb}.${total_tb}TB used"
+    else
+        capacity_display="${total_used}/${total_capacity}GB"
+    fi
+    
+    # Health status colors
+    local health_good="${GREEN}${good_health}✅${RESET}"
+    local health_warn=""
+    local health_crit=""
+    if [[ $warning_health -gt 0 ]]; then
+        health_warn=" ${YELLOW}${warning_health}⚠️${RESET}"
+    fi
+    if [[ $critical_health -gt 0 ]]; then
+        health_crit=" ${RED}${critical_health}❌${RESET}"
+    fi
+    
+    # Temperature display with color coding
+    local temp_display=""
+    if [[ $temp_readings -gt 0 ]]; then
+        local temp_color=""
+        if [[ $max_temp -gt 55 ]]; then
+            temp_color="$RED"
+        elif [[ $max_temp -gt 45 ]]; then
+            temp_color="$YELLOW"
+        else
+            temp_color="$GREEN"
+        fi
+        temp_display=" │ Temp: ${temp_color}${min_temp}-${max_temp}°C${RESET}"
+    fi
+    
+    # Generate header box
+    local header_width=72
+    local border_line=$(printf "%*s" $((header_width - 2)) "" | tr ' ' '─')
+    
+    echo "┌${border_line}┐"
+    printf "│%*s%s%*s│\n" $(( (header_width - 20) / 2 )) "" "SnapRAID System Status" $(( (header_width - 20) / 2 )) ""
+    echo "├${border_line}┤"
+    
+    # Array status line
+    printf "│ Array: %s │ Health: %s%s%s │ %s%*s│\n" \
+        "${allocated_drives}/${total_drives} drives" \
+        "$health_good" "$health_warn" "$health_crit" \
+        "$capacity_display" \
+        $((header_width - 35 - ${#capacity_display})) ""
+    
+    # Status and temperature line  
+    printf "│ Status: %s │ Last Sync: %-12s%s%*s│\n" \
+        "$snapraid_status" \
+        "$last_sync" \
+        "$temp_display" \
+        $((header_width - 45 - ${#last_sync})) ""
+        
+    echo "└${border_line}┘"
+    echo ""
+}
+
+# Calculate position number from connector and device slot
+#-------------------------------------------------------------------------------
+function calculate_position_number {
+    local connector="$1"
+    local device="$2"
+    
+    # Position calculation: connector * 4 + (4 - device)
+    # This gives us positions 1-24 for a 6x4 grid
+    local position=$(( connector * 4 + (4 - device) ))
+    echo "$position"
+}
+
+# Test function for the system overview header
 
 # Initialize color scheme for visual display
 #-------------------------------------------------------------------------------
@@ -401,23 +601,26 @@ function debug_visualization {
     fi
 }
 
-# Enhanced render function with capacity information
+# Enhanced render function with capacity and health information
 #-------------------------------------------------------------------------------
-function render_drive_grid_with_capacity {
+function render_drive_grid_enhanced {
     local physical_layout_data="$1"
     local label_type="${2:-mount}"
     local blinking_devices="$3"
     local use_colors="${4:-true}"
     local show_capacity="${5:-false}"
-    local show_overview="${6:-false}"
-    shift 6
+    local show_health="${6:-false}"
+    local show_overview="${7:-false}"
+    local show_numbered="${8:-false}"
+    shift 8
     local unified_device_data=("$@")
     
     # Initialize colors
     pooltool::init_visual_colors "$use_colors"
     
-    # Get capacity information if requested
+    # Get capacity and health information if requested
     local -A capacity_info
+    local -A health_info
     local overview_data=""
     
     if [[ "$show_capacity" == "true" ]]; then
@@ -443,6 +646,22 @@ function render_drive_grid_with_capacity {
                             fi
                         fi
                     fi
+                fi
+            fi
+        done
+    fi
+    
+    if [[ "$show_health" == "true" ]]; then
+        # Get health data for all devices
+        for record in "${unified_device_data[@]}"; do
+            if [[ "$record" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*):([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+                local mount_name="${BASH_REMATCH[1]}"
+                local system_device="${BASH_REMATCH[6]}"
+                
+                if [[ "$mount_name" != "N/A" && "$system_device" != "N/A" ]]; then
+                    local health_status
+                    health_status=$(pooltool::get_drive_health "$system_device")
+                    health_info["$mount_name"]="$health_status"
                 fi
             fi
         done
@@ -512,25 +731,8 @@ function render_drive_grid_with_capacity {
     done
     
     # Show system overview if requested
-    if [[ "$show_overview" == "true" && -n "$overview_data" ]]; then
-        if [[ "$overview_data" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+)$ ]]; then
-            local total_drives="${BASH_REMATCH[1]}"
-            local mounted_drives="${BASH_REMATCH[2]}"
-            local total_capacity="${BASH_REMATCH[3]}"
-            local total_used="${BASH_REMATCH[4]}"
-            local total_available="${BASH_REMATCH[5]}"
-            local overall_usage="${BASH_REMATCH[6]}"
-            
-            echo "┌${border_line}┐"
-            echo "│$(printf "%*s" $((box_width)) "System Overview")│"
-            echo "├${border_line}┤"
-            
-            local usage_bar
-            usage_bar=$(pooltool::generate_usage_bar "$overall_usage" "$use_colors" 20)
-            printf "│  Total: %d drives (%d mounted)  │  Capacity: %dGB  │  Used: %s %d%%  │\n" \
-                   "$total_drives" "$mounted_drives" "$total_capacity" "$usage_bar" "$overall_usage"
-            echo "├${border_line}┤"
-        fi
+    if [[ "$show_overview" == "true" ]]; then
+        generate_system_overview_header "${unified_device_data[@]}"
     fi
     
     # Header
@@ -539,8 +741,17 @@ function render_drive_grid_with_capacity {
     fi
     
     local title="Physical Drive Bay Layout"
-    if [[ "$show_capacity" == "true" ]]; then
+    if [[ "$show_capacity" == "true" && "$show_health" == "true" ]]; then
+        title="Drive Layout with Capacity & Health"
+    elif [[ "$show_capacity" == "true" ]]; then
         title="Drive Bay Layout with Capacity"
+    elif [[ "$show_health" == "true" ]]; then
+        title="Drive Bay Layout with Health"
+    fi
+    
+    # Add numbered indicator to title
+    if [[ "$show_numbered" == "true" ]]; then
+        title="$title (Numbered)"
     fi
     
     local title_padding=$(( (box_width - ${#title}) / 2 ))
@@ -619,10 +830,38 @@ function render_drive_grid_with_capacity {
                         fi
                     fi
                 fi
+                
+                # Add health indicator if enabled and available
+                if [[ "$show_health" == "true" && -n "${health_info[$device_name]}" ]]; then
+                    local health_data="${health_info[$device_name]}"
+                    if [[ "$health_data" =~ ^([^:]+): ]]; then
+                        local health_status="${BASH_REMATCH[1]}"
+                        local health_indicator
+                        health_indicator=$(pooltool::get_health_indicator "$health_status" "$use_colors")
+                        
+                        # Insert health indicator before the closing bracket: [DRU03 ●] becomes [DRU03 ●✅]
+                        cell_content=$(echo "$cell_content" | sed "s/]/$health_indicator]/")
+                    fi
+                fi
+                
+                # Add position numbering if enabled
+                if [[ "$show_numbered" == "true" ]]; then
+                    # Position calculation: connector * 4 + (4 - device)
+                    local position_num=$(( connector * 4 + (4 - device) ))
+                    # Prepend position number: [DRU03 ●] becomes 1[DRU03 ●]
+                    cell_content="${position_num}${cell_content}"
+                fi
             else
                 # Handle empty bay using standard formatter
                 local empty_record="EMPTY::::::::::::::"
                 cell_content=$(pooltool::format_device_label "$empty_record" "$label_type" "$max_label_length" "empty")
+                
+                # Add position numbering for empty bays too
+                if [[ "$show_numbered" == "true" ]]; then
+                    # Position calculation: connector * 4 + (4 - device)
+                    local position_num=$(( connector * 4 + (4 - device) ))
+                    cell_content="${position_num}${cell_content}"
+                fi
             fi
             
             row_parts+=("$cell_content")
@@ -645,6 +884,34 @@ function render_drive_grid_with_capacity {
         echo "│  Capacity: ▓▓▓░ (Green <70%, Yellow 70-85%, Red >85%)       │"
     fi
     
+    if [[ "$show_health" == "true" ]]; then
+        echo "│  Health: ✅=Good ⚠️=Warning ❌=Critical ◐=No SMART ◯=Unknown  │"
+    fi
+    
     echo "│  DRU = Data drive, PPU = Parity drive                      │"
     echo "└${border_line}┘"
+}
+
+# Test function for the system overview header
+#-------------------------------------------------------------------------------
+function test_system_overview_header {
+    local controller="${1:-0}"
+    
+    echo "Testing System Overview Header..."
+    echo "================================"
+    
+    # Get unified device data
+    local unified_data
+    if unified_data=$(pooltool::create_unified_mapping "$controller" 2>/dev/null); then
+        readarray -t unified_array <<< "$unified_data"
+        
+        echo "Generating system overview header:"
+        echo
+        generate_system_overview_header "${unified_array[@]}"
+        echo
+        echo "Header test complete!"
+    else
+        echo "Failed to get unified device data"
+        return 1
+    fi
 }

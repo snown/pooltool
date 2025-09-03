@@ -1,0 +1,430 @@
+#!/usr/bin/env bash
+#NAMESPACE=pooltool
+
+dependencies::register_module "pooltool/healthutils"
+
+# Global cache for SMART data to avoid repeated arcconf calls
+declare -g SMART_DATA_CACHE=""
+declare -g SMART_DATA_TIMESTAMP=0
+declare -g SMART_CACHE_TTL=300  # 5 minutes
+
+# Get cached SMART data or refresh if needed
+#-------------------------------------------------------------------------------
+function get_cached_smart_data {
+    local controller="${1:-1}"
+    local current_time=$(date +%s)
+    
+    # Check if cache is still valid (within TTL)
+    if [[ -n "$SMART_DATA_CACHE" && $((current_time - SMART_DATA_TIMESTAMP)) -lt $SMART_CACHE_TTL ]]; then
+        echo "$SMART_DATA_CACHE"
+        return 0
+    fi
+    
+    # Cache is expired or empty, refresh it
+    local smart_output
+    if smart_output=$(arcconf GETSMARTSTATS "$controller" tabular 2>/dev/null); then
+        SMART_DATA_CACHE="$smart_output"
+        SMART_DATA_TIMESTAMP="$current_time"
+        echo "$SMART_DATA_CACHE"
+        return 0
+    else
+        # Failed to get new data, return cached data if available
+        if [[ -n "$SMART_DATA_CACHE" ]]; then
+            echo "$SMART_DATA_CACHE"
+            return 0
+        else
+            return 1
+        fi
+    fi
+}
+
+# Get SMART health status for a drive using arcconf
+#-------------------------------------------------------------------------------
+function get_drive_health {
+    local system_device="$1"
+    local controller="${2:-1}"
+    
+    if [[ -z "$system_device" || "$system_device" == "N/A" ]]; then
+        echo "unknown:0:0:unknown"
+        return 0
+    fi
+    
+    # Check if arcconf is available
+    if ! command -v arcconf >/dev/null 2>&1; then
+        echo "no_smart:0:0:arcconf_not_available"
+        return 0
+    fi
+    
+    # Get the unified mapping to find the arcconf channel/id for this device
+    local unified_data
+    if ! unified_data=$(pooltool::create_unified_mapping "$controller" 2>/dev/null); then
+        echo "error:0:0:mapping_failed"
+        return 0
+    fi
+    
+    # Find the specific drive's arcconf channel and device ID
+    local target_channel="" target_device_id=""
+    while IFS= read -r record; do
+        # Parse record format: mount_name:arcconf_id:connector:device_slot:snapraid_name:system_device:wwn:serial:channel:device_num:model:size:match_method
+        if [[ "$record" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*):([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+            local system_dev="${BASH_REMATCH[6]}"
+            local channel="${BASH_REMATCH[9]}"
+            local device_id="${BASH_REMATCH[10]}"
+            
+            if [[ "$system_dev" == "$system_device" ]]; then
+                target_channel="$channel"
+                target_device_id="$device_id"
+                break
+            fi
+        fi
+    done <<< "$unified_data"
+    
+    # If we couldn't find the device in the mapping, return error
+    if [[ -z "$target_channel" || -z "$target_device_id" ]]; then
+        echo "error:0:0:device_not_found_in_mapping"
+        return 0
+    fi
+    
+    # Get cached SMART data for all drives
+    local smart_output
+    if ! smart_output=$(pooltool::get_cached_smart_data "$controller"); then
+        echo "error:0:0:arcconf_failed"
+        return 0
+    fi
+    
+    local health_status="good"  # Default to good if we can read data
+    local temperature=0
+    local power_hours=0
+    local reallocated_sectors=0
+    local in_attribute=false
+    local current_attribute=""
+    local looking_for_raw_value=false
+    local in_target_drive=false
+    local current_channel="" current_id=""
+    
+    # Parse the arcconf output line by line
+    while IFS= read -r line; do
+        # Skip empty lines
+        [[ -z "$line" ]] && continue
+        
+        # Look for PhysicalDriveSmartStats sections
+        if [[ "$line" =~ PhysicalDriveSmartStats ]]; then
+            in_target_drive=false
+            in_attribute=false
+            current_attribute=""
+            looking_for_raw_value=false
+            current_channel=""
+            current_id=""
+            continue
+        fi
+        
+        # Get channel and id for current drive
+        if [[ "$line" =~ channel[[:space:]]*\.+[[:space:]]*([0-9]+) ]]; then
+            current_channel="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ id[[:space:]]*\.+[[:space:]]*([0-9]+) ]] && [[ -z "$current_id" ]]; then
+            # This is the drive ID line (not an attribute ID)
+            current_id="${BASH_REMATCH[1]}"
+            # Check if this is our target drive
+            if [[ "$current_channel" == "$target_channel" && "$current_id" == "$target_device_id" ]]; then
+                in_target_drive=true
+            fi
+        fi
+        
+        # Only process if we're in the target drive
+        if [[ "$in_target_drive" == true ]]; then
+            # Look for attribute sections
+            if [[ "$line" =~ Attribute[[:space:]]*$ ]]; then
+                in_attribute=true
+                current_attribute=""
+                looking_for_raw_value=false
+                continue
+            fi
+            
+            # Process lines within attribute section
+            if [[ "$in_attribute" == true ]]; then
+                # Look for specific attribute IDs
+                if [[ "$line" =~ id[[:space:]]*\.+[[:space:]]*0xC2 ]]; then
+                    current_attribute="temperature"
+                    looking_for_raw_value=true
+                elif [[ "$line" =~ id[[:space:]]*\.+[[:space:]]*0x09 ]]; then
+                    current_attribute="power_hours"  
+                    looking_for_raw_value=true
+                elif [[ "$line" =~ id[[:space:]]*\.+[[:space:]]*0x05 ]]; then
+                    current_attribute="reallocated"
+                    looking_for_raw_value=true
+                elif [[ "$looking_for_raw_value" == true && "$line" =~ rawValue[[:space:]]*\.+[[:space:]]*([0-9]+) ]]; then
+                    local raw_value="${BASH_REMATCH[1]}"
+                    case "$current_attribute" in
+                        "temperature") temperature="$raw_value" ;;
+                        "power_hours") power_hours="$raw_value" ;;
+                        "reallocated") reallocated_sectors="$raw_value" ;;
+                    esac
+                    looking_for_raw_value=false
+                    current_attribute=""
+                elif [[ "$line" =~ Status[[:space:]]*\.+[[:space:]]*(.+) ]]; then
+                    local attr_status="${BASH_REMATCH[1]}"
+                    # If any attribute status is not OK, mark as critical  
+                    if [[ "$attr_status" != "OK" ]]; then
+                        health_status="critical"
+                    fi
+                fi
+                
+                # End of attribute section
+                if [[ "$line" =~ ^[[:space:]]*$ ]]; then
+                    in_attribute=false
+                fi
+            fi
+        fi
+    done <<< "$smart_output"
+    
+    # Apply warning conditions
+    if [[ $temperature -gt 50 || $reallocated_sectors -gt 0 ]]; then
+        if [[ "$health_status" == "good" ]]; then
+            health_status="warning"
+        fi
+    fi
+    
+    # Output format: health_status:temperature:power_hours:reallocated_sectors
+    echo "${health_status}:${temperature}:${power_hours}:${reallocated_sectors}"
+}
+
+# Get health status indicator symbol
+#-------------------------------------------------------------------------------
+function get_health_indicator {
+    local health_status="$1"
+    local use_colors="${2:-true}"
+    
+    case "$health_status" in
+        "good")
+            if [[ "$use_colors" == "true" ]]; then
+                echo $'\033[32m✅\033[0m'  # Green checkmark
+            else
+                echo "✓"
+            fi
+            ;;
+        "warning")
+            if [[ "$use_colors" == "true" ]]; then
+                echo $'\033[33m⚠️\033[0m'   # Yellow warning
+            else
+                echo "!"
+            fi
+            ;;
+        "critical")
+            if [[ "$use_colors" == "true" ]]; then
+                echo $'\033[91m❌\033[0m'  # Red X
+            else
+                echo "X"
+            fi
+            ;;
+        "no_smart")
+            if [[ "$use_colors" == "true" ]]; then
+                echo $'\033[90m◐\033[0m'   # Gray circle
+            else
+                echo "?"
+            fi
+            ;;
+        "unknown"|"error"|*)
+            if [[ "$use_colors" == "true" ]]; then
+                echo $'\033[90m◯\033[0m'   # Gray circle
+            else
+                echo "?"
+            fi
+            ;;
+    esac
+}
+
+# Get comprehensive health data for all devices efficiently (single SMART call)
+#-------------------------------------------------------------------------------
+function get_all_health_info_efficient {
+    local controller="${1:-1}"
+    local unified_data=("${@:2}")
+    
+    # Get cached SMART data once for all drives
+    local smart_output
+    if ! smart_output=$(pooltool::get_cached_smart_data "$controller"); then
+        echo "Error: Failed to get SMART data for health analysis" >&2
+        return 1
+    fi
+    
+    # Create a lookup table of SMART data by channel:device_id
+    local -A smart_data_by_drive
+    local current_channel="" current_id="" in_drive=false
+    local health_status="good" temperature=0 power_hours=0 reallocated_sectors=0
+    local in_attribute=false current_attribute="" looking_for_raw_value=false
+    
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        
+        # Look for PhysicalDriveSmartStats sections
+        if [[ "$line" =~ PhysicalDriveSmartStats ]]; then
+            # Save previous drive data if we have it
+            if [[ -n "$current_channel" && -n "$current_id" ]]; then
+                smart_data_by_drive["${current_channel}:${current_id}"]="${health_status}:${temperature}:${power_hours}:${reallocated_sectors}"
+            fi
+            
+            # Reset for new drive
+            in_drive=false
+            in_attribute=false
+            current_channel=""
+            current_id=""
+            health_status="good"
+            temperature=0
+            power_hours=0
+            reallocated_sectors=0
+            current_attribute=""
+            looking_for_raw_value=false
+            continue
+        fi
+        
+        # Get channel and id for current drive
+        if [[ "$line" =~ channel[[:space:]]*\.+[[:space:]]*([0-9]+) ]]; then
+            current_channel="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ id[[:space:]]*\.+[[:space:]]*([0-9]+) ]] && [[ -z "$current_id" ]]; then
+            current_id="${BASH_REMATCH[1]}"
+            in_drive=true
+        fi
+        
+        # Process SMART attributes for current drive
+        if [[ "$in_drive" == true ]]; then
+            # Look for attribute sections
+            if [[ "$line" =~ Attribute[[:space:]]*$ ]]; then
+                in_attribute=true
+                current_attribute=""
+                looking_for_raw_value=false
+                continue
+            fi
+            
+            # Process lines within attribute section
+            if [[ "$in_attribute" == true ]]; then
+                # Look for specific attribute IDs
+                if [[ "$line" =~ id[[:space:]]*\.+[[:space:]]*0xC2 ]]; then
+                    current_attribute="temperature"
+                    looking_for_raw_value=true
+                elif [[ "$line" =~ id[[:space:]]*\.+[[:space:]]*0x09 ]]; then
+                    current_attribute="power_hours"  
+                    looking_for_raw_value=true
+                elif [[ "$line" =~ id[[:space:]]*\.+[[:space:]]*0x05 ]]; then
+                    current_attribute="reallocated"
+                    looking_for_raw_value=true
+                elif [[ "$looking_for_raw_value" == true && "$line" =~ rawValue[[:space:]]*\.+[[:space:]]*([0-9]+) ]]; then
+                    local raw_value="${BASH_REMATCH[1]}"
+                    case "$current_attribute" in
+                        "temperature") temperature="$raw_value" ;;
+                        "power_hours") power_hours="$raw_value" ;;
+                        "reallocated") reallocated_sectors="$raw_value" ;;
+                    esac
+                    looking_for_raw_value=false
+                    current_attribute=""
+                elif [[ "$line" =~ Status[[:space:]]*\.+[[:space:]]*(.+) ]]; then
+                    local attr_status="${BASH_REMATCH[1]}"
+                    if [[ "$attr_status" != "OK" ]]; then
+                        health_status="critical"
+                    fi
+                fi
+                
+                # End of attribute section
+                if [[ "$line" =~ ^[[:space:]]*$ ]]; then
+                    in_attribute=false
+                fi
+            fi
+        fi
+    done <<< "$smart_output"
+    
+    # Save the last drive data
+    if [[ -n "$current_channel" && -n "$current_id" ]]; then
+        smart_data_by_drive["${current_channel}:${current_id}"]="${health_status}:${temperature}:${power_hours}:${reallocated_sectors}"
+    fi
+    
+    # Now process each unified device record and attach health data
+    for record in "${unified_data[@]}"; do
+        # Parse record format: mount_name:arcconf_id:connector:device_slot:snapraid_name:system_device:wwn:serial:channel:device_num:model:size:match_method
+        if [[ "$record" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*):([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+            local mount_name="${BASH_REMATCH[1]}"
+            local system_device="${BASH_REMATCH[6]}"
+            local channel="${BASH_REMATCH[9]}"
+            local device_id="${BASH_REMATCH[10]}"
+            
+            if [[ "$mount_name" != "N/A" && "$system_device" != "N/A" && -n "$channel" && -n "$device_id" ]]; then
+                local health_data="${smart_data_by_drive[${channel}:${device_id}]:-unknown:0:0:not_found}"
+                
+                # Apply warning conditions
+                if [[ "$health_data" =~ ^([^:]+):([^:]+):([^:]+):([^:]+)$ ]]; then
+                    local h_status="${BASH_REMATCH[1]}"
+                    local h_temp="${BASH_REMATCH[2]}"
+                    local h_hours="${BASH_REMATCH[3]}"
+                    local h_sectors="${BASH_REMATCH[4]}"
+                    
+                    if [[ $h_temp -gt 50 || $h_sectors -gt 0 ]]; then
+                        if [[ "$h_status" == "good" ]]; then
+                            h_status="warning"
+                        fi
+                    fi
+                    health_data="${h_status}:${h_temp}:${h_hours}:${h_sectors}"
+                fi
+                
+                echo "${record}:${health_data}"
+            else
+                echo "${record}:unknown:0:0:not_available"
+            fi
+        fi
+    done
+}
+
+# Force refresh of SMART data cache
+#-------------------------------------------------------------------------------
+function refresh_smart_cache {
+    local controller="${1:-1}"
+    SMART_DATA_CACHE=""
+    SMART_DATA_TIMESTAMP=0
+    pooltool::get_cached_smart_data "$controller" >/dev/null
+}
+
+# Generate health summary for system overview
+#-------------------------------------------------------------------------------
+function get_health_summary {
+    local health_data="$1"
+    
+    local total_drives=0
+    local good_drives=0
+    local warning_drives=0
+    local critical_drives=0
+    local no_smart_drives=0
+    local max_temp=0
+    local avg_temp=0
+    local temp_count=0
+    
+    while IFS= read -r line; do
+        if [[ "$line" =~ :([^:]+):([^:]+):([^:]+):([^:]+)$ ]]; then
+            local health_status="${BASH_REMATCH[1]}"
+            local temperature="${BASH_REMATCH[2]}"
+            local power_hours="${BASH_REMATCH[3]}"
+            local reallocated="${BASH_REMATCH[4]}"
+            
+            total_drives=$((total_drives + 1))
+            
+            case "$health_status" in
+                "good") good_drives=$((good_drives + 1)) ;;
+                "warning") warning_drives=$((warning_drives + 1)) ;;
+                "critical") critical_drives=$((critical_drives + 1)) ;;
+                "no_smart") no_smart_drives=$((no_smart_drives + 1)) ;;
+            esac
+            
+            # Track temperature
+            if [[ "$temperature" =~ ^[0-9]+$ && $temperature -gt 0 ]]; then
+                if [[ $temperature -gt $max_temp ]]; then
+                    max_temp=$temperature
+                fi
+                avg_temp=$((avg_temp + temperature))
+                temp_count=$((temp_count + 1))
+            fi
+        fi
+    done <<< "$health_data"
+    
+    # Calculate average temperature
+    if [[ $temp_count -gt 0 ]]; then
+        avg_temp=$((avg_temp / temp_count))
+    fi
+    
+    # Output format: total:good:warning:critical:no_smart:max_temp:avg_temp
+    echo "${total_drives}:${good_drives}:${warning_drives}:${critical_drives}:${no_smart_drives}:${max_temp}:${avg_temp}"
+}

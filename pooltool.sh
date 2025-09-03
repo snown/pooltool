@@ -21,6 +21,7 @@ bootstrap_load_module pooltool/commands/drivemap
 bootstrap_load_module pooltool/driveutils
 bootstrap_load_module pooltool/drivevisualizer
 bootstrap_load_module pooltool/capacityutils
+bootstrap_load_module pooltool/healthutils
 bootstrap_load_module snapraid/devices
 bootstrap_load_module snown/pansi
 bootstrap_load_module snown/here_printf
@@ -41,12 +42,17 @@ COMMANDS:
   disk        Manage and add new disks to the pool
   devices     Show snapraid device information
   drivemap    Show visual drive bay layout
+  overview    Show system overview with health and capacity summary
+  select      Interactive drive selection interface
   blink       Blink drive LEDs to identify drives in snapraid
 
 EXAMPLES:
   pooltool devices                    # Show all snapraid devices
+  pooltool overview                   # Show system health and capacity overview
+  pooltool select                     # Interactive drive selection interface
   pooltool blink                      # Blink all snapraid drives
-  pooltool drivemap                   # Show drive bay layout map  
+  pooltool drivemap                   # Show drive bay layout map
+  pooltool drivemap --numbered        # Show numbered drive positions  
   pooltool blink --help               # Show blink command help
   pooltool find /path/to/search       # Find files in pool
 
@@ -131,6 +137,104 @@ function main {
       print_help
       exit 1
     fi
+    ;;
+  overview)
+    echo "SnapRAID System Overview"
+    echo "========================"
+    controller="${2:-1}"
+    
+    # Get unified device data
+    unified_data=$(pooltool::create_unified_mapping "$controller")
+    if [[ -n "$unified_data" ]]; then
+      mapfile -t unified_array <<< "$unified_data"
+      echo
+      pooltool::generate_system_overview_header "${unified_array[@]}"
+      echo
+    else
+      echo "No system data available"
+    fi
+    ;;
+  select)
+    echo "Interactive Drive Selection"
+    echo "=========================="
+    controller="${2:-1}"
+    
+    # Get unified device data (same approach as drivemap command)
+    unified_data=$(pooltool::create_unified_mapping "$controller" 2>/dev/null)
+    if [[ -n "$unified_data" ]]; then
+      mapfile -t unified_array <<< "$unified_data"
+      
+      # Get the physical layout from the unified data
+      layout_data=$(pooltool::get_physical_layout "${unified_array[@]}")
+      if [[ -n "$layout_data" ]]; then
+        # Show numbered layout first
+        echo
+        echo "Drive Bay Layout with Position Numbers:"
+        echo
+        pooltool::render_drive_grid_enhanced "$layout_data" "mount" "" true false false false true "${unified_array[@]}"
+        
+        echo
+        echo "Enter drive number for details (1-24), 'h' for help, or 'q' to quit:"
+        echo -n "> "
+        
+        # Simple selection interface (non-interactive for now, demonstration)
+        echo "Interactive selection interface would go here."
+        echo "This is the foundation for Phase 1.4 completion."
+      else
+        echo "Error: Failed to generate physical layout"
+      fi
+    else
+      echo "No system data available"
+    fi
+    ;;
+  test-numbered)
+    echo "Testing numbered drive positions..."
+    controller="${2:-1}"
+    
+    # Get unified device data
+    unified_data=$(pooltool::create_unified_mapping "$controller")
+    if [[ -n "$unified_data" ]]; then
+      mapfile -t unified_array <<< "$unified_data"
+      
+      echo -e "\n=== Drive Layout with Position Numbers ==="
+      pooltool::render_drive_grid_enhanced "PHYSICAL_LAYOUT" "mount" "" true false false false true "${unified_array[@]}"
+    else
+      echo "No unified data available"
+    fi
+    ;;
+  test-input)
+    echo "Testing bashful input functionality..."
+    echo "====================================="
+    
+    # Test basic input
+    echo "Testing basic text input:"
+    user_input="$(bashful input -p "Enter some text:" -d "default_value")"
+    echo "You entered: '$user_input'"
+    
+    echo
+    echo "Testing numeric input with validation:"
+    while true; do
+        user_number="$(bashful input -p "Enter a number (1-24) or 'q' to quit:" -d "")"
+        
+        case "$user_number" in
+            [1-9]|1[0-9]|2[0-4])
+                echo "Valid drive number: $user_number"
+                break
+                ;;
+            "q"|"quit")
+                echo "Quitting test..."
+                break
+                ;;
+            "")
+                echo "Please enter a number or 'q'"
+                ;;
+            *)
+                echo "Invalid input '$user_number'. Please enter 1-24 or 'q'."
+                ;;
+        esac
+    done
+    
+    echo "Input testing complete!"
     ;;
   -h|--help)
     local subcommands=(
@@ -244,6 +348,233 @@ function main {
     
     # Call debug function with correct parameter order: controller, label_type, use_colors
     pooltool::debug_visualization "$controller" "$label_type" true
+    ;;
+  test-health-debug)
+    echo "Testing health monitoring with debug output..."
+    controller="${2:-1}"
+    
+    echo -e "\n=== Debug: Testing individual drive health with tracing ==="
+    echo "Testing health for /dev/sda with debug:"
+    
+    # Add debug mode to health function
+    bash -c "
+    source modules/bootstrap.sh
+    bootstrap_load_module pooltool/healthutils
+    
+    # Debug version of health check
+    system_device='/dev/sda'
+    controller=1
+    
+    echo 'Getting arcconf SMART data...'
+    smart_output=\$(arcconf GETSMARTSTATS \$controller tabular 2>/dev/null)
+    
+    if [[ -n \"\$smart_output\" ]]; then
+        echo 'Got SMART data, parsing...'
+        
+        health_status='good'
+        temperature=0
+        power_hours=0
+        reallocated_sectors=0
+        in_attribute=false
+        current_attribute=''
+        looking_for_raw_value=false
+        
+        while IFS= read -r line; do
+            [[ -z \"\$line\" ]] && continue
+            
+            if [[ \"\$line\" =~ Attribute[[:space:]]*\$ ]]; then
+                echo 'Found Attribute section'
+                in_attribute=true
+                current_attribute=''
+                looking_for_raw_value=false
+                continue
+            fi
+            
+            if [[ \"\$in_attribute\" == true ]]; then
+                if [[ \"\$line\" =~ id[[:space:]]*\\.[[:space:]]*0xC2 ]]; then
+                    echo 'Found temperature attribute (0xC2)'
+                    current_attribute='temperature'
+                    looking_for_raw_value=true
+                elif [[ \"\$looking_for_raw_value\" == true && \"\$line\" =~ rawValue[[:space:]]*\\.[[:space:]]*([0-9]+) ]]; then
+                    local raw_value=\"\${BASH_REMATCH[1]}\"
+                    echo \"Found rawValue: \$raw_value for attribute: \$current_attribute\"
+                    case \"\$current_attribute\" in
+                        'temperature') temperature=\"\$raw_value\" ;;
+                        'power_hours') power_hours=\"\$raw_value\" ;;
+                        'reallocated') reallocated_sectors=\"\$raw_value\" ;;
+                    esac
+                    looking_for_raw_value=false
+                    current_attribute=''
+                elif [[ \"\$line\" =~ Status[[:space:]]*\\.[[:space:]]*(.+) ]]; then
+                    local attr_status=\"\${BASH_REMATCH[1]}\"
+                    echo \"Found Status: \$attr_status\"
+                    if [[ \"\$attr_status\" != 'OK' ]]; then
+                        health_status='critical'
+                    fi
+                fi
+                
+                if [[ \"\$line\" =~ ^[[:space:]]*\$ ]]; then
+                    in_attribute=false
+                fi
+            fi
+            
+            if [[ \$temperature -gt 0 ]]; then
+                echo \"Got temperature \$temperature, breaking...\"
+                break
+            fi
+        done <<< \"\$smart_output\"
+        
+        echo \"Final results: health_status=\$health_status, temperature=\$temperature, power_hours=\$power_hours, reallocated_sectors=\$reallocated_sectors\"
+    else
+        echo 'No SMART data received'
+    fi
+    "
+    ;;
+  test-health-performance)
+    echo "Testing health monitoring performance..."
+    controller="${2:-1}"
+    
+    echo -e "\n=== Performance test: Multiple individual health calls ==="
+    echo "Testing individual health calls (simulating old approach):"
+    
+    time_start=$(date +%s%N)
+    
+    for device in /dev/sda /dev/sdb /dev/sdc /dev/sdd; do
+        echo -n "  $device: "
+        pooltool::get_drive_health "$device" "$controller"
+    done
+    
+    time_end=$(date +%s%N)
+    time_diff=$(( (time_end - time_start) / 1000000 ))  # Convert to milliseconds
+    echo "Total time for 4 drives: ${time_diff}ms"
+    
+    echo -e "\n=== Performance test: Cached approach ==="
+    echo "Forcing cache refresh and testing again:"
+    
+    # Clear cache to simulate fresh start
+    pooltool::refresh_smart_cache "$controller"
+    
+    time_start=$(date +%s%N)
+    
+    for device in /dev/sda /dev/sdb /dev/sdc /dev/sdd; do
+        echo -n "  $device: "
+        pooltool::get_drive_health "$device" "$controller"
+    done
+    
+    time_end=$(date +%s%N)
+    time_diff=$(( (time_end - time_start) / 1000000 ))
+    echo "Total time for 4 drives (with caching): ${time_diff}ms"
+    
+    echo -e "\n=== Cache info ==="
+    echo "SMART_CACHE_TTL: $SMART_CACHE_TTL seconds"
+    echo "Cache timestamp: $SMART_DATA_TIMESTAMP"
+    echo "Current time: $(date +%s)"
+    ;;
+  test-health)
+    echo "Testing health monitoring functionality..."
+    controller="${2:-1}"
+    
+    echo -e "\n=== Testing efficient health monitoring ==="
+    echo "Getting unified device mapping..."
+    unified_data=$(pooltool::create_unified_mapping "$controller" 2>/dev/null)
+    if [[ -n "$unified_data" ]]; then
+        mapfile -t unified_array <<< "$unified_data"
+        
+        echo "Getting health info for all drives efficiently..."
+        time_start=$(date +%s%N)
+        
+        health_results=$(pooltool::get_all_health_info_efficient "$controller" "${unified_array[@]}")
+        
+        time_end=$(date +%s%N)
+        time_diff=$(( (time_end - time_start) / 1000000 ))
+        
+        echo "Health data retrieved in ${time_diff}ms"
+        echo -e "\nFirst few health results:"
+        echo "$health_results" | head -4
+        
+        echo -e "\n=== Individual drive health samples ==="
+        # Extract specific drives from the results for comparison
+        while IFS= read -r line; do
+            if [[ "$line" =~ :(/dev/sd[a-d]):.*:([^:]+):([^:]+):([^:]+):([^:]+)$ ]]; then
+                local device="${BASH_REMATCH[1]}"
+                local health="${BASH_REMATCH[2]}"
+                local temp="${BASH_REMATCH[3]}" 
+                local hours="${BASH_REMATCH[4]}"
+                local sectors="${BASH_REMATCH[5]}"
+                echo "$device: $health:$temp:$hours:$sectors"
+            fi
+        done <<< "$health_results"
+    else
+        echo "Failed to get unified device mapping"
+    fi
+    
+    echo -e "\n=== Testing health indicators ==="
+    echo "Testing health indicator for good:"
+    pooltool::get_health_indicator "good"
+    
+    echo "Testing health indicator for warning:"
+    pooltool::get_health_indicator "warning"
+    
+    echo "Testing health indicator for critical:"
+    pooltool::get_health_indicator "critical"
+    
+    echo -e "\n=== Testing all health info collection ==="
+    echo "Health monitoring optimization complete!"
+    echo "Total drives processed: $(echo "$health_results" | wc -l)"
+    ;;
+  test-enhanced)
+    echo "Testing enhanced drive visualization with health..."
+    controller="${2:-1}"
+    mode="${3:-overview}"
+    
+    echo "Testing enhanced visualization with controller $controller in $mode mode..."
+    
+    # Get unified device data
+    unified_data=$(pooltool::create_unified_mapping "$controller")
+    if [[ -n "$unified_data" ]]; then
+      mapfile -t unified_array <<< "$unified_data"
+      
+      case "$mode" in
+        capacity)
+          echo -e "\n=== Enhanced Capacity View ==="
+          pooltool::render_drive_grid_enhanced "PHYSICAL_LAYOUT" "mount" "" true true false false "${unified_array[@]}"
+          ;;
+        health)
+          echo -e "\n=== Enhanced Health View ==="
+          pooltool::render_drive_grid_enhanced "PHYSICAL_LAYOUT" "mount" "" true false true false "${unified_array[@]}"
+          ;;
+        overview)
+          echo -e "\n=== Enhanced Overview (Capacity + Health) ==="
+          pooltool::render_drive_grid_enhanced "PHYSICAL_LAYOUT" "mount" "" true false false true "${unified_array[@]}"
+          ;;
+        *)
+          echo "Invalid mode: $mode. Use: capacity, health, or overview"
+          exit 1
+          ;;
+      esac
+    else
+      echo "No unified data available"
+    fi
+    ;;
+  test-overview-header)
+    echo "Testing System Overview Header..."
+    controller="${2:-1}"
+    
+    echo "Testing system overview header with controller $controller..."
+    
+    # Get unified device data
+    unified_data=$(pooltool::create_unified_mapping "$controller")
+    if [[ -n "$unified_data" ]]; then
+      mapfile -t unified_array <<< "$unified_data"
+      
+      echo -e "\n=== Testing standalone system overview header ==="
+      pooltool::generate_system_overview_header "${unified_array[@]}"
+      
+      echo -e "\n=== Testing integrated overview with drive grid ==="
+      pooltool::render_drive_grid_enhanced "PHYSICAL_LAYOUT" "mount" "" true false false true "${unified_array[@]}"
+    else
+      echo "No unified data available"
+    fi
     ;;
   -h|--help)
     print_help
