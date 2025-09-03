@@ -976,6 +976,12 @@ Blinking LED for drive DRU08 at position 12 (/dev/sdk)...
 - **Performance**: Leverages existing caching infrastructure for fast response times
 - **Integration**: Seamless integration with existing health, capacity, and blink modules
 
+#### **🐛 Critical Bug Fix:**
+- **Non-Interactive Mode**: Fixed infinite loop when stdin exhausted in piped input scenarios
+- **Detection Logic**: Added `[ -t 0 ]` check to identify non-interactive mode properly
+- **Clean Exit**: Ensures proper termination after command processing in scripts/automation
+- **Validation**: Tested extensively with `echo "command" | pooltool select` patterns
+
 **Phase 2.3 Status**: **✅ COMPLETE** - Extended interactive commands ready for production use!
 
 ### **📈 Progress Tracking:**
