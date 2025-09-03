@@ -20,6 +20,7 @@ bootstrap_load_module pooltool/commands/blink
 bootstrap_load_module pooltool/commands/drivemap
 bootstrap_load_module pooltool/driveutils
 bootstrap_load_module pooltool/drivevisualizer
+bootstrap_load_module pooltool/capacityutils
 bootstrap_load_module snapraid/devices
 bootstrap_load_module snown/pansi
 bootstrap_load_module snown/here_printf

@@ -2,6 +2,7 @@
 #NAMESPACE=pooltool
 
 dependencies::depends "pooltool/driveutils"
+dependencies::depends "pooltool/capacityutils"
 dependencies::register_module "pooltool/drivevisualizer"
 
 # Initialize color scheme for visual display
@@ -398,4 +399,251 @@ function debug_visualization {
         echo "Failed to get unified device data" >&2
         return 1
     fi
+}
+
+# Enhanced render function with capacity information
+#-------------------------------------------------------------------------------
+function render_drive_grid_with_capacity {
+    local physical_layout_data="$1"
+    local label_type="${2:-mount}"
+    local blinking_devices="$3"
+    local use_colors="${4:-true}"
+    local show_capacity="${5:-false}"
+    local show_overview="${6:-false}"
+    shift 6
+    local unified_device_data=("$@")
+    
+    # Initialize colors
+    pooltool::init_visual_colors "$use_colors"
+    
+    # Get capacity information if requested
+    local -A capacity_info
+    local overview_data=""
+    
+    if [[ "$show_capacity" == "true" ]]; then
+        # Get capacity data for all devices - simplified inline version
+        for record in "${unified_device_data[@]}"; do
+            # Parse record format: mount_name:arcconf_id:connector:device_slot:snapraid_name:system_device:wwn:serial:channel:device_num:model:size:match_method
+            if [[ "$record" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*):([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+                local mount_name="${BASH_REMATCH[1]}"
+                local system_device="${BASH_REMATCH[6]}"
+                
+                if [[ "$mount_name" != "N/A" && "$system_device" != "N/A" ]]; then
+                    # Try to find mount point for this device - use actual mount naming convention
+                    local expected_mount="/mnt/${mount_name}"
+                    if mountpoint -q "$expected_mount" 2>/dev/null; then
+                        # Get df info for mounted drive
+                        local df_output
+                        if df_output=$(df -h "$expected_mount" 2>/dev/null | tail -n1); then
+                            # Parse df output to get usage percentage
+                            local use_percent_raw
+                            use_percent_raw=$(echo "$df_output" | awk '{print $5}' | tr -d '%')
+                            if [[ "$use_percent_raw" =~ ^[0-9]+$ ]]; then
+                                capacity_info["$mount_name"]="mounted:${use_percent_raw}"
+                            fi
+                        fi
+                    fi
+                fi
+            fi
+        done
+    fi
+    
+    # Calculate dimensions based on capacity display
+    local max_label_length=10  # Base label length
+    local cell_width=16         # Increased width for capacity bars
+    local total_width=72        # Wider total layout
+    local box_width=80          # Wider box
+    
+    if [[ "$show_capacity" == "true" ]]; then
+        cell_width=18
+        total_width=80
+        box_width=88
+    fi
+    
+    # Create layout mapping
+    local -A layout_by_position
+    local -A status_by_position
+    
+    # Skip the "PHYSICAL_LAYOUT:" header and process the layout rows
+    local in_layout=false
+    local connector_index=0
+    while IFS= read -r line; do
+        if [[ "$line" == "PHYSICAL_LAYOUT:" ]]; then
+            in_layout=true
+            continue
+        fi
+        
+        if [[ "$in_layout" == true && -n "$line" ]]; then
+            read -ra device_pairs <<< "$line"
+            local device_index=3
+            for device_pair in "${device_pairs[@]}"; do
+                if [[ "$device_pair" =~ ^([^:]+):(.+)$ ]]; then
+                    local device_name="${BASH_REMATCH[1]}"
+                    local device_status="${BASH_REMATCH[2]}"
+                    
+                    local position_key="${connector_index}_${device_index}"
+                    layout_by_position["$position_key"]="$device_name"
+                    status_by_position["$position_key"]="$device_status"
+                    
+                    ((device_index--))
+                fi
+            done
+            ((connector_index++))
+        fi
+    done <<< "$physical_layout_data"
+    
+    # Create device lookup by position
+    local -A device_by_position
+    for record in "${unified_device_data[@]}"; do
+        if [[ "$record" =~ ^([^:]+):([^:]+):([^:]+):([^:]+): ]]; then
+            local mount_name="${BASH_REMATCH[1]}"
+            local connector="${BASH_REMATCH[3]}"
+            local device_slot="${BASH_REMATCH[4]}"
+            
+            local position_key="${connector}_${device_slot}"
+            device_by_position["$position_key"]="$record"
+        fi
+    done
+    
+    # Build border
+    local border_line=""
+    for ((i=0; i<box_width; i++)); do
+        border_line+="─"
+    done
+    
+    # Show system overview if requested
+    if [[ "$show_overview" == "true" && -n "$overview_data" ]]; then
+        if [[ "$overview_data" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+)$ ]]; then
+            local total_drives="${BASH_REMATCH[1]}"
+            local mounted_drives="${BASH_REMATCH[2]}"
+            local total_capacity="${BASH_REMATCH[3]}"
+            local total_used="${BASH_REMATCH[4]}"
+            local total_available="${BASH_REMATCH[5]}"
+            local overall_usage="${BASH_REMATCH[6]}"
+            
+            echo "┌${border_line}┐"
+            echo "│$(printf "%*s" $((box_width)) "System Overview")│"
+            echo "├${border_line}┤"
+            
+            local usage_bar
+            usage_bar=$(pooltool::generate_usage_bar "$overall_usage" "$use_colors" 20)
+            printf "│  Total: %d drives (%d mounted)  │  Capacity: %dGB  │  Used: %s %d%%  │\n" \
+                   "$total_drives" "$mounted_drives" "$total_capacity" "$usage_bar" "$overall_usage"
+            echo "├${border_line}┤"
+        fi
+    fi
+    
+    # Header
+    if [[ "$show_overview" != "true" ]]; then
+        echo "┌${border_line}┐"
+    fi
+    
+    local title="Physical Drive Bay Layout"
+    if [[ "$show_capacity" == "true" ]]; then
+        title="Drive Bay Layout with Capacity"
+    fi
+    
+    local title_padding=$(( (box_width - ${#title}) / 2 ))
+    printf "│%*s%s%*s│\n" $title_padding "" "$title" $((box_width - title_padding - ${#title})) ""
+    echo "├${border_line}┤"
+    
+    # Render grid with capacity information
+    for connector in {0..5}; do
+        local row_parts=()
+        
+        for device in {3..0}; do
+            local position_key="${connector}_${device}"
+            local device_name="${layout_by_position[$position_key]}"
+            local device_status="${status_by_position[$position_key]}"
+            local device_record="${device_by_position[$position_key]}"
+            
+            if [[ -n "$device_name" && "$device_name" != "N/A" ]]; then
+                # Format device label
+                local label
+                label=$(pooltool::format_device_label "$device_record" "$label_type")
+                
+                # Determine status indicator based on device status and blinking
+                local status_indicator
+                if [[ -n "$blinking_devices" && "$blinking_devices" =~ (^|,)${device_name}(,|$) ]]; then
+                    status_indicator="$LED_ON"
+                elif [[ "$device_status" == "unallocated" ]]; then
+                    status_indicator="$LED_UNALLOCATED"
+                else
+                    status_indicator="$LED_OFF"
+                fi
+                
+                # Build cell content
+                local cell_content="[${label} ${status_indicator}]"
+                
+                # Add capacity bar if enabled
+                if [[ "$show_capacity" == "true" && -n "${capacity_info[$device_name]}" ]]; then
+                    local cap_info="${capacity_info[$device_name]}"
+                    if [[ "$cap_info" =~ ^([^:]+):([^:]+)$ ]]; then
+                        local mount_status="${BASH_REMATCH[1]}"
+                        local use_percent="${BASH_REMATCH[2]}"
+                        
+                        if [[ "$mount_status" == "mounted" ]]; then
+                            # Generate simple usage bar
+                            local bar_width=6
+                            local filled_blocks=$((use_percent * bar_width / 100))
+                            local empty_blocks=$((bar_width - filled_blocks))
+                            
+                            # Choose color based on usage
+                            local bar_color=""
+                            local reset_color=""
+                            if [[ "$use_colors" == "true" ]]; then
+                                reset_color=$'\033[0m'
+                                if [[ $use_percent -ge 85 ]]; then
+                                    bar_color=$'\033[91m'  # Bright red
+                                elif [[ $use_percent -ge 70 ]]; then
+                                    bar_color=$'\033[33m'  # Yellow
+                                else
+                                    bar_color=$'\033[32m'  # Green
+                                fi
+                            fi
+                            
+                            # Build the bar
+                            local usage_bar=""
+                            for ((i=0; i<filled_blocks; i++)); do
+                                usage_bar+="▓"
+                            done
+                            for ((i=0; i<empty_blocks; i++)); do
+                                usage_bar+="░"
+                            done
+                            
+                            cell_content="${cell_content} ${bar_color}${usage_bar}${reset_color}"
+                        fi
+                    fi
+                fi
+                
+                row_parts+=("$cell_content")
+            else
+                # Empty bay
+                local empty_content="[-------]"
+                if [[ "$show_capacity" == "true" ]]; then
+                    empty_content="${empty_content}      "
+                fi
+                row_parts+=("$empty_content")
+            fi
+        done
+        
+        # Print row
+        printf "│  %s  %s  %s  %s  │\n" "${row_parts[@]}"
+        
+        # Add spacing between rows
+        if [[ $connector -lt 5 ]]; then
+            echo "│$(printf "%*s" $((box_width)) "")│"
+        fi
+    done
+    
+    # Footer with legend
+    echo "├${border_line}┤"
+    echo "│  ● = Drive present    + = Unallocated drive    - = Empty bay      │"
+    
+    if [[ "$show_capacity" == "true" ]]; then
+        echo "│  Usage bars: ▓▓▓░░░ (Green <70%, Yellow 70-85%, Red >85%)        │"
+    fi
+    
+    echo "│  DRU = Data drive, PPU = Parity drive                              │"
+    echo "└${border_line}┘"
 }

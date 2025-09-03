@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+#NAMESPACE=pooltool
+
+dependencies::register_module "pooltool/capacityutils"
+
+# Get capacity information for mounted drives
+#-------------------------------------------------------------------------------
+function pooltool::get_drive_capacity_info {
+    local system_device="$1"
+    local mount_name="$2"
+    
+    # Try to find mount point for this device
+    local mount_point=""
+    
+    # Check if it's mounted at the expected location
+    if [[ -n "$mount_name" && "$mount_name" != "N/A" ]]; then
+        local expected_mount="/mnt/disk${mount_name#DRU}"
+        if mountpoint -q "$expected_mount" 2>/dev/null; then
+            mount_point="$expected_mount"
+        fi
+    fi
+    
+    # If not found, search all mount points for this device
+    if [[ -z "$mount_point" && -n "$system_device" ]]; then
+        # Get actual device (follow symlinks if needed)
+        local real_device
+        if real_device=$(readlink -f "$system_device" 2>/dev/null); then
+            # Check if this device is mounted anywhere
+            mount_point=$(df --output=target "$real_device" 2>/dev/null | tail -n1)
+        fi
+    fi
+    
+    # Get capacity information if mounted
+    if [[ -n "$mount_point" && -d "$mount_point" ]]; then
+        # Use df to get filesystem info
+        local df_output
+        if df_output=$(df -B1 "$mount_point" 2>/dev/null | tail -n1); then
+            # Parse df output: filesystem 1K-blocks used available use% mounted_on
+            read -r filesystem size_bytes used_bytes avail_bytes use_percent mounted_on <<< "$df_output"
+            
+            # Calculate percentages
+            local use_percent_num="${use_percent%\%}"
+            local free_percent=$((100 - use_percent_num))
+            
+            # Format sizes for display
+            local size_gb=$((size_bytes / 1024 / 1024 / 1024))
+            local used_gb=$((used_bytes / 1024 / 1024 / 1024))
+            local avail_gb=$((avail_bytes / 1024 / 1024 / 1024))
+            
+            # Output format: mounted:use_percent:size_gb:used_gb:avail_gb:mount_point
+            echo "mounted:${use_percent_num}:${size_gb}:${used_gb}:${avail_gb}:${mount_point}"
+            return 0
+        fi
+    fi
+    
+    # Not mounted or no capacity info available
+    echo "unmounted:0:0:0:0:"
+    return 0
+}
+
+# Generate a visual usage bar for a drive
+#-------------------------------------------------------------------------------
+function pooltool::generate_usage_bar {
+    local use_percent="$1"
+    local use_colors="${2:-true}"
+    local bar_width="${3:-8}"
+    
+    # Calculate filled blocks
+    local filled_blocks=$((use_percent * bar_width / 100))
+    local empty_blocks=$((bar_width - filled_blocks))
+    
+    # Choose colors based on usage
+    local bar_color=""
+    local reset_color=""
+    
+    if [[ "$use_colors" == "true" ]]; then
+        reset_color=$'\033[0m'
+        if [[ $use_percent -ge 95 ]]; then
+            bar_color=$'\033[91m'  # Bright red
+        elif [[ $use_percent -ge 85 ]]; then
+            bar_color=$'\033[93m'  # Bright yellow
+        elif [[ $use_percent -ge 70 ]]; then
+            bar_color=$'\033[33m'  # Yellow
+        else
+            bar_color=$'\033[32m'  # Green
+        fi
+    fi
+    
+    # Build the bar
+    local filled_bar=""
+    local empty_bar=""
+    
+    for ((i=0; i<filled_blocks; i++)); do
+        filled_bar+="▓"
+    done
+    
+    for ((i=0; i<empty_blocks; i++)); do
+        empty_bar+="░"
+    done
+    
+    echo "${bar_color}${filled_bar}${empty_bar}${reset_color}"
+}
+
+# Get comprehensive capacity data for all devices
+#-------------------------------------------------------------------------------
+function pooltool::get_all_capacity_info {
+    local unified_data=("$@")
+    
+    for record in "${unified_data[@]}"; do
+        # Parse record format: mount_name:arcconf_id:connector:device_slot:snapraid_name:system_device:wwn:serial:channel:device_num:model:size:match_method
+        if [[ "$record" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*):([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+            local mount_name="${BASH_REMATCH[1]}"
+            local system_device="${BASH_REMATCH[6]}"
+            
+            if [[ "$mount_name" != "N/A" && "$system_device" != "N/A" ]]; then
+                local capacity_info
+                capacity_info=$(pooltool::get_drive_capacity_info "$system_device" "$mount_name")
+                echo "${record}:${capacity_info}"
+            else
+                echo "${record}:unmounted:0:0:0:0:"
+            fi
+        fi
+    done
+}
+
+# Get system overview information
+#-------------------------------------------------------------------------------
+function pooltool::get_system_overview {
+    local total_drives=0
+    local mounted_drives=0
+    local total_capacity=0
+    local total_used=0
+    local total_available=0
+    
+    # Process all capacity data
+    while IFS= read -r line; do
+        if [[ "$line" =~ :([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]*)$ ]]; then
+            local mount_status="${BASH_REMATCH[1]}"
+            local use_percent="${BASH_REMATCH[2]}"
+            local size_gb="${BASH_REMATCH[3]}"
+            local used_gb="${BASH_REMATCH[4]}"
+            local avail_gb="${BASH_REMATCH[5]}"
+            
+            total_drives=$((total_drives + 1))
+            
+            if [[ "$mount_status" == "mounted" ]]; then
+                mounted_drives=$((mounted_drives + 1))
+                total_capacity=$((total_capacity + size_gb))
+                total_used=$((total_used + used_gb))
+                total_available=$((total_available + avail_gb))
+            fi
+        fi
+    done
+    
+    # Calculate overall usage percentage
+    local overall_usage=0
+    if [[ $total_capacity -gt 0 ]]; then
+        overall_usage=$((total_used * 100 / total_capacity))
+    fi
+    
+    # Output format: total_drives:mounted_drives:total_capacity:total_used:total_available:overall_usage
+    echo "${total_drives}:${mounted_drives}:${total_capacity}:${total_used}:${total_available}:${overall_usage}"
+}

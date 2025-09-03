@@ -10,6 +10,8 @@ function drivemap {
     local use_colors="true"
     local controller="1"
     local label_type="mount"
+    local show_capacity="false"
+    local show_overview="false"
     
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -25,6 +27,15 @@ function drivemap {
                 label_type="$2"
                 shift 2
                 ;;
+            --capacity)
+                show_capacity="true"
+                shift
+                ;;
+            --overview)
+                show_overview="true"
+                show_capacity="true"  # Overview implies capacity
+                shift
+                ;;
             -h|--help)
                 cat << 'HELPEOF'
 Usage: pooltool drivemap [OPTIONS]
@@ -35,6 +46,8 @@ OPTIONS:
     --no-color         Disable colors (use symbols only)
     --controller N     Target specific controller (default: 1)
     --labels TYPE      Label style: mount|device|arcconf|snapraid (default: mount)
+    --capacity         Show drive capacity usage bars
+    --overview         Show system overview with capacity information
     -h, --help         Show this help message
 
 DESCRIPTION:
@@ -48,8 +61,14 @@ EXAMPLES:
     pooltool drivemap                     # Show drive layout with mount names
     pooltool drivemap --no-color          # Show layout without colors
     pooltool drivemap --labels device     # Show device paths (sda, sdb, etc.)
-    pooltool drivemap --labels arcconf    # Show arcconf positions (C0D0, C0D1, etc.)
+    pooltool drivemap --capacity          # Show layout with usage bars
+    pooltool drivemap --overview          # Show system overview and capacity
     pooltool drivemap --controller 2      # Show drives on controller 2
+
+CAPACITY DISPLAY:
+    Usage bars show drive utilization: ▓▓▓░░░
+    Colors: Green (<70%), Yellow (70-85%), Red (>85%)
+    Only mounted drives show capacity information.
 
 HELPEOF
                 return 0
@@ -74,8 +93,14 @@ HELPEOF
             # Get the physical layout from the unified data
             local layout_data
             if layout_data=$(pooltool::get_physical_layout "${unified_array[@]}"); then
-                # Use the new visualization system - no blinking devices for drivemap
-                pooltool::render_drive_grid "$layout_data" "$label_type" "" "$use_colors" "${unified_array[@]}"
+                # Choose render function based on capacity display option
+                if [[ "$show_capacity" == "true" || "$show_overview" == "true" ]]; then
+                    # Use enhanced visualization with capacity information
+                    pooltool::render_drive_grid_with_capacity "$layout_data" "$label_type" "" "$use_colors" "$show_capacity" "$show_overview" "${unified_array[@]}"
+                else
+                    # Use standard visualization - no blinking devices for drivemap
+                    pooltool::render_drive_grid "$layout_data" "$label_type" "" "$use_colors" "${unified_array[@]}"
+                fi
             else
                 echo "Error: Failed to generate physical layout" >&2
                 return 1
