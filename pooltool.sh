@@ -159,6 +159,9 @@ function main {
     echo "=========================="
     controller="${2:-1}"
     
+    # Load the input handling module
+    bootstrap_load_module pooltool/ask_question
+    
     # Get unified device data (same approach as drivemap command)
     unified_data=$(pooltool::create_unified_mapping "$controller" 2>/dev/null)
     if [[ -n "$unified_data" ]]; then
@@ -174,12 +177,145 @@ function main {
         pooltool::render_drive_grid_enhanced "$layout_data" "mount" "" true false false false true "${unified_array[@]}"
         
         echo
-        echo "Enter drive number for details (1-24), 'h' for help, or 'q' to quit:"
-        echo -n "> "
+        echo "Commands: [1-24] = Show drive details | 'h' = Help | 'q' = Quit"
+        echo
         
-        # Simple selection interface (non-interactive for now, demonstration)
-        echo "Interactive selection interface would go here."
-        echo "This is the foundation for Phase 1.4 completion."
+        # Interactive loop
+        while true; do
+          user_input="$(bashful input -p "Select drive position:" -d "")"
+          
+          case "$user_input" in
+            [1-9]|1[0-9]|2[0-4])
+              echo "Drive Position $user_input Details:"
+              echo "=================================="
+              
+              # Find the drive at this position by iterating through all drives and calculating their positions
+              local drive_found=false
+              local position_num="$user_input"
+              
+              # Find the drive record for this position
+              for record in "${unified_array[@]}"; do
+                if [[ "$record" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*):([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+                  local rec_connector="${BASH_REMATCH[3]}"
+                  local rec_device="${BASH_REMATCH[4]}"
+                  
+                  # Calculate the position for this drive using the same formula as the visualizer
+                  local calc_position=$(( rec_connector * 4 + (4 - rec_device) ))
+                  
+                  if [[ "$calc_position" == "$position_num" ]]; then
+                    drive_found=true
+                    local mount_name="${BASH_REMATCH[1]}"
+                    local arcconf_id="${BASH_REMATCH[2]}"
+                    local snapraid_name="${BASH_REMATCH[5]}"
+                    local system_device="${BASH_REMATCH[6]}"
+                    local wwn="${BASH_REMATCH[7]}"
+                    local serial="${BASH_REMATCH[8]}"
+                    local model="${BASH_REMATCH[11]}"
+                    local size="${BASH_REMATCH[12]}"
+                    
+                    echo "Mount Name: $mount_name"
+                    echo "Device Path: $system_device"
+                    echo "Model: $model"
+                    echo "Size: $size"
+                    echo "Serial: $serial"
+                    if [[ -n "$snapraid_name" ]]; then
+                      echo "SnapRAID Role: $snapraid_name"
+                    else
+                      echo "SnapRAID Role: Not assigned"
+                    fi
+                    echo "Arcconf Position: Channel 0, Device $arcconf_id"
+                                        echo "Physical Position: Connector $rec_connector, Slot $rec_device"
+                    
+                    # Get health information if available
+                    if [[ "$system_device" != "N/A" ]]; then
+                      echo
+                      echo "Health Information:"
+                      health_info=$(pooltool::get_drive_health "$system_device" "$controller")
+                      if [[ "$health_info" =~ ^([^:]+):([^:]+):([^:]+):([^:]+)$ ]]; then
+                        local health_status="${BASH_REMATCH[1]}"
+                        local temperature="${BASH_REMATCH[2]}"
+                        local power_hours="${BASH_REMATCH[3]}"
+                        local reallocated="${BASH_REMATCH[4]}"
+                        
+                        echo "  Status: $health_status"
+                        if [[ $temperature -gt 0 ]]; then
+                          echo "  Temperature: ${temperature}°C"
+                        fi
+                        if [[ $power_hours -gt 0 ]]; then
+                          local years=$((power_hours / 8760))
+                          local days=$(( (power_hours % 8760) / 24 ))
+                          echo "  Power-on Time: ${power_hours}h (${years}y ${days}d)"
+                        fi
+                        if [[ $reallocated -gt 0 ]]; then
+                          echo "  Reallocated Sectors: $reallocated"
+                        fi
+                      fi
+                    fi
+                    
+                    # Get capacity information if mounted
+                    if [[ "$mount_name" =~ ^(DRU|PPU) ]]; then
+                      local expected_mount="/mnt/${mount_name}"
+                      if mountpoint -q "$expected_mount" 2>/dev/null; then
+                        echo
+                        echo "Capacity Information:"
+                        local df_output
+                        if df_output=$(df -h "$expected_mount" 2>/dev/null | tail -n1); then
+                          local size_h used_h avail_h use_percent
+                          read -r _ size_h used_h avail_h use_percent _ <<< "$df_output"
+                          echo "  Total Size: $size_h"
+                          echo "  Used Space: $used_h"
+                          echo "  Available: $avail_h"
+                          echo "  Usage: $use_percent"
+                        fi
+                      else
+                        echo
+                        echo "Capacity Information: Not mounted"
+                      fi
+                    fi
+                    
+                    echo
+                    break
+                  fi
+                fi
+              done
+              
+              if [[ "$drive_found" == false ]]; then
+                echo "Position $position_num: Empty bay"
+                echo
+              fi
+              ;;
+            "h"|"help")
+              echo
+              echo "Interactive Drive Selection Help"
+              echo "================================"
+              echo
+              echo "Commands:"
+              echo "  1-24    Show details for drive at position number"
+              echo "  h       Show this help message"
+              echo "  q       Quit and return to shell"
+              echo
+              echo "Drive positions are numbered 1-24 from top-left to bottom-right"
+              echo "in the 6x4 drive bay layout shown above."
+              echo
+              echo "Examples:"
+              echo "  5       Show details for drive at position 5"
+              echo "  12      Show details for drive at position 12"
+              echo "  h       Show help"
+              echo "  q       Quit"
+              echo
+              ;;
+            "q"|"quit"|"exit")
+              echo "Exiting interactive drive selection."
+              break
+              ;;
+            "")
+              echo "Please enter a drive position (1-24), 'h' for help, or 'q' to quit."
+              ;;
+            *)
+              echo "Invalid input '$user_input'. Please enter 1-24, 'h' for help, or 'q' to quit."
+              ;;
+          esac
+        done
       else
         echo "Error: Failed to generate physical layout"
       fi
