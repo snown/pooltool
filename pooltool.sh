@@ -18,6 +18,7 @@ bootstrap_load_module pooltool/commands/mv
 bootstrap_load_module pooltool/commands/disk
 bootstrap_load_module pooltool/commands/blink
 bootstrap_load_module pooltool/commands/drivemap
+bootstrap_load_module pooltool/commands/health
 bootstrap_load_module pooltool/driveutils
 bootstrap_load_module pooltool/drivevisualizer
 bootstrap_load_module pooltool/capacityutils
@@ -44,12 +45,16 @@ COMMANDS:
   drivemap    Show visual drive bay layout
   overview    Show system overview with health and capacity summary
   select      Interactive drive selection interface
+  health      Check drive health status (supports automation flags)
   blink       Blink drive LEDs to identify drives in snapraid
 
 EXAMPLES:
   pooltool devices                    # Show all snapraid devices
   pooltool overview                   # Show system health and capacity overview
   pooltool select                     # Interactive drive selection interface
+  pooltool health 5                   # Check health of drive at position 5
+  pooltool health --all --quiet       # Check all drives, minimal output
+  pooltool health --json              # JSON output for automation
   pooltool blink                      # Blink all snapraid drives
   pooltool drivemap                   # Show drive bay layout map
   pooltool drivemap --numbered        # Show numbered drive positions  
@@ -153,6 +158,10 @@ function main {
     else
       echo "No system data available"
     fi
+    ;;
+  health)
+    shift
+    pooltool::commands::health "$@"
     ;;
   select)
     echo "Interactive Drive Selection"
