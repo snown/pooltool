@@ -1,0 +1,289 @@
+#!/bin/bash
+#NAMESPACE=pooltool::background
+
+# Background Process Manager for PoolTool
+# Handles long-running operations like drive recovery, SnapRAID operations, etc.
+
+dependencies::register_module "pooltool/background/process_manager"
+
+#================================================================
+# Process Management Functions
+#================================================================
+
+function start_background_process {
+    local operation_type="$1"
+    local operation_id="$2"
+    local command="$3"
+    local log_file="$4"
+    
+    local pid_dir="/var/run/pooltool"
+    local state_dir="/var/lib/pooltool/processes"
+    
+    # Ensure directories exist
+    mkdir -p "$pid_dir" "$state_dir" 2>/dev/null || {
+        # Fallback to user directories if system dirs not writable
+        pid_dir="${HOME}/.pooltool/run"
+        state_dir="${HOME}/.pooltool/processes"
+        mkdir -p "$pid_dir" "$state_dir"
+    }
+    
+    local pid_file="${pid_dir}/${operation_id}.pid"
+    local state_file="${state_dir}/${operation_id}.json"
+    
+    # Create initial state
+    cat > "$state_file" << EOF
+{
+    "operation_id": "$operation_id",
+    "operation_type": "$operation_type",
+    "status": "starting",
+    "start_time": "$(date -Iseconds)",
+    "pid": null,
+    "log_file": "$log_file",
+    "progress": {
+        "current": 0,
+        "total": 100,
+        "message": "Initializing..."
+    },
+    "estimated_completion": null,
+    "last_update": "$(date -Iseconds)"
+}
+EOF
+    
+    # Start process in background with proper logging
+    (
+        # Update state to running
+        this::update_process_state "$operation_id" "running" "Process started"
+        
+        # Execute the command with output capture
+        if eval "$command" >> "$log_file" 2>&1; then
+            this::update_process_state "$operation_id" "completed" "Operation completed successfully"
+            exit 0
+        else
+            this::update_process_state "$operation_id" "failed" "Operation failed"
+            exit 1
+        fi
+    ) &
+    
+    local bg_pid=$!
+    
+    # Store PID
+    echo "$bg_pid" > "$pid_file"
+    
+    # Update state with PID
+    this::update_process_state "$operation_id" "running" "Process started with PID $bg_pid" "$bg_pid"
+    
+    echo "$operation_id"
+}
+
+function update_process_state {
+    local operation_id="$1"
+    local status="$2"
+    local message="$3"
+    local pid="$4"
+    local progress_current="$5"
+    local progress_total="$6"
+    
+    local state_dir="/var/lib/pooltool/processes"
+    [[ ! -d "$state_dir" ]] && state_dir="${HOME}/.pooltool/processes"
+    
+    local state_file="${state_dir}/${operation_id}.json"
+    
+    if [[ -f "$state_file" ]]; then
+        # Update existing state
+        local temp_file=$(mktemp)
+        jq --arg status "$status" \
+           --arg message "$message" \
+           --arg timestamp "$(date -Iseconds)" \
+           --arg pid "${pid:-null}" \
+           --arg current "${progress_current:-null}" \
+           --arg total "${progress_total:-null}" '
+           .status = $status |
+           .last_update = $timestamp |
+           .progress.message = $message |
+           if $pid != "null" then .pid = ($pid | tonumber) else . end |
+           if $current != "null" then .progress.current = ($current | tonumber) else . end |
+           if $total != "null" then .progress.total = ($total | tonumber) else . end
+        ' "$state_file" > "$temp_file" && mv "$temp_file" "$state_file"
+    fi
+}
+
+function get_process_status {
+    local operation_id="$1"
+    
+    local state_dir="/var/lib/pooltool/processes"
+    [[ ! -d "$state_dir" ]] && state_dir="${HOME}/.pooltool/processes"
+    
+    local state_file="${state_dir}/${operation_id}.json"
+    
+    if [[ -f "$state_file" ]]; then
+        cat "$state_file"
+    else
+        echo '{"error": "Process not found", "operation_id": "'$operation_id'"}'
+        return 1
+    fi
+}
+
+function list_active_processes {
+    local state_dir="/var/lib/pooltool/processes"
+    [[ ! -d "$state_dir" ]] && state_dir="${HOME}/.pooltool/processes"
+    
+    local processes=()
+    
+    if [[ -d "$state_dir" ]]; then
+        for state_file in "$state_dir"/*.json; do
+            [[ -f "$state_file" ]] || continue
+            
+            local status=$(jq -r '.status' "$state_file" 2>/dev/null)
+            local operation_id=$(basename "$state_file" .json)
+            
+            # Check if process is actually running
+            if [[ "$status" == "running" ]]; then
+                local pid=$(jq -r '.pid' "$state_file" 2>/dev/null)
+                if [[ "$pid" != "null" ]] && ! kill -0 "$pid" 2>/dev/null; then
+                    # Process died, update state
+                    this::update_process_state "$operation_id" "failed" "Process died unexpectedly"
+                    status="failed"
+                fi
+            fi
+            
+            if [[ "$status" == "running" || "$status" == "starting" ]]; then
+                processes+=("$operation_id")
+            fi
+        done
+    fi
+    
+    printf '%s\n' "${processes[@]}"
+}
+
+function kill_process {
+    local operation_id="$1"
+    local force="$2"
+    
+    local state_dir="/var/lib/pooltool/processes"
+    [[ ! -d "$state_dir" ]] && state_dir="${HOME}/.pooltool/processes"
+    
+    local state_file="${state_dir}/${operation_id}.json"
+    
+    if [[ -f "$state_file" ]]; then
+        local pid=$(jq -r '.pid' "$state_file" 2>/dev/null)
+        
+        if [[ "$pid" != "null" ]] && kill -0 "$pid" 2>/dev/null; then
+            if [[ "$force" == "true" ]]; then
+                kill -KILL "$pid"
+            else
+                kill -TERM "$pid"
+            fi
+            
+            this::update_process_state "$operation_id" "cancelled" "Process terminated by user"
+            return 0
+        else
+            echo "Process not running or already terminated"
+            return 1
+        fi
+    else
+        echo "Process not found: $operation_id"
+        return 1
+    fi
+}
+
+function wait_for_process {
+    local operation_id="$1"
+    local timeout="$2"
+    
+    local start_time=$(date +%s)
+    local end_time=$((start_time + ${timeout:-0}))
+    
+    while true; do
+        local status_json=$(this::get_process_status "$operation_id")
+        local status=$(echo "$status_json" | jq -r '.status')
+        
+        case "$status" in
+            "completed"|"failed"|"cancelled")
+                echo "$status_json"
+                return 0
+                ;;
+            "running"|"starting")
+                if [[ "$timeout" -gt 0 ]] && [[ $(date +%s) -gt $end_time ]]; then
+                    echo '{"error": "Timeout waiting for process"}'
+                    return 1
+                fi
+                sleep 2
+                ;;
+            *)
+                echo '{"error": "Unknown process status"}'
+                return 1
+                ;;
+        esac
+    done
+}
+
+#================================================================
+# Progress Monitoring Functions
+#================================================================
+
+function monitor_process_output {
+    local operation_id="$1"
+    local follow="$2"
+    
+    local state_json=$(this::get_process_status "$operation_id")
+    local log_file=$(echo "$state_json" | jq -r '.log_file')
+    
+    if [[ -f "$log_file" ]]; then
+        if [[ "$follow" == "true" ]]; then
+            tail -f "$log_file"
+        else
+            tail -50 "$log_file"
+        fi
+    else
+        echo "Log file not found: $log_file"
+        return 1
+    fi
+}
+
+function generate_operation_id {
+    local prefix="$1"
+    echo "${prefix}-$(date +%Y%m%d-%H%M%S)-$$"
+}
+
+#================================================================
+# Utility Functions
+#================================================================
+
+function cleanup_old_processes {
+    local max_age_days="${1:-7}"
+    
+    local state_dir="/var/lib/pooltool/processes"
+    [[ ! -d "$state_dir" ]] && state_dir="${HOME}/.pooltool/processes"
+    
+    if [[ -d "$state_dir" ]]; then
+        find "$state_dir" -name "*.json" -mtime +$max_age_days -delete
+    fi
+    
+    local pid_dir="/var/run/pooltool"
+    [[ ! -d "$pid_dir" ]] && pid_dir="${HOME}/.pooltool/run"
+    
+    if [[ -d "$pid_dir" ]]; then
+        find "$pid_dir" -name "*.pid" -mtime +$max_age_days -delete
+    fi
+}
+
+function estimate_completion {
+    local operation_id="$1"
+    
+    local state_json=$(this::get_process_status "$operation_id")
+    local current=$(echo "$state_json" | jq -r '.progress.current')
+    local total=$(echo "$state_json" | jq -r '.progress.total')
+    local start_time=$(echo "$state_json" | jq -r '.start_time')
+    
+    if [[ "$current" != "null" && "$total" != "null" && "$current" -gt 0 ]]; then
+        local elapsed_seconds=$(( $(date +%s) - $(date -d "$start_time" +%s) ))
+        local progress_ratio=$(echo "scale=4; $current / $total" | bc)
+        local estimated_total_seconds=$(echo "scale=0; $elapsed_seconds / $progress_ratio" | bc)
+        local remaining_seconds=$(( estimated_total_seconds - elapsed_seconds ))
+        
+        local completion_time=$(date -d "+${remaining_seconds} seconds" -Iseconds)
+        echo "$completion_time"
+    else
+        echo "null"
+    fi
+}

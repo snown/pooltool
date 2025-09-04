@@ -985,9 +985,30 @@ replace_migration_snapraid_rebuild() {
     fi
     
     echo "⚠️  SnapRAID Integration Notice:"
-    echo "Full SnapRAID automation will be implemented in a future version."
-    echo "For now, please run the commands manually after physical replacement."
+    echo "SnapRAID operations can take several hours to complete."
+    echo "You can run them in the background and monitor progress."
     echo ""
+    
+    local run_background="false"
+    if pooltool::question -p "Run SnapRAID operations in background?" -d "y"; then
+        run_background="true"
+    fi
+    
+    if [[ "$run_background" == "true" ]]; then
+        echo "🔄 SnapRAID operations will run in background"
+        echo "Use 'pooltool monitor' to track progress"
+        this::start_snapraid_recovery_background "$REPLACE_TARGET_DRIVE"
+        return 0
+    else
+        echo "⚠️  You will need to run SnapRAID commands manually:"
+        if [[ "$REPLACE_TARGET_DRIVE" =~ PPU[0-9]+ ]]; then
+            echo "  1. snapraid sync"
+            echo "  2. snapraid scrub"
+        else
+            echo "  1. snapraid fix -d $REPLACE_TARGET_DRIVE"
+            echo "  2. snapraid scrub -d $REPLACE_TARGET_DRIVE"
+        fi
+    fi
     
     if ! pooltool::question -p "Have you prepared for SnapRAID rebuild process?" -d "n"; then
         echo "⚠️  SnapRAID rebuild preparation not confirmed"
@@ -1856,6 +1877,211 @@ get_drive_info_by_position() {
     
     # No drive found at this position
     return 1
+}
+
+#================================================================
+# Background Process Functions
+#================================================================
+
+#
+# Start SnapRAID recovery operations in background
+#
+start_snapraid_recovery_background() {
+    local target_drive="$1"
+    
+    # Load background process manager
+    bootstrap_load_module pooltool/background/process_manager
+    bootstrap_load_module pooltool/background/notifications
+    
+    local operation_id=$(pooltool::background::process_manager::generate_operation_id "drive-recovery")
+    local log_dir="/var/log/pooltool"
+    local log_file="${log_dir}/${operation_id}.log"
+    
+    # Ensure log directory exists
+    mkdir -p "$log_dir" 2>/dev/null || {
+        log_dir="${HOME}/.pooltool/logs"
+        log_file="${log_dir}/${operation_id}.log"
+        mkdir -p "$log_dir"
+    }
+    
+    echo ""
+    echo "🚀 STARTING BACKGROUND RECOVERY"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo "Operation ID: $operation_id"
+    echo "Target Drive: $target_drive"
+    echo "Log File: $log_file"
+    echo ""
+    
+    # Determine if this is a parity or data drive
+    local command=""
+    if [[ "$target_drive" =~ PPU[0-9]+ ]]; then
+        echo "📋 Parity drive recovery process will:"
+        echo "  1. Run 'snapraid sync' to rebuild parity"
+        echo "  2. Run 'snapraid scrub' to verify integrity"
+        command="this::snapraid_parity_recovery '$target_drive' '$operation_id'"
+    else
+        echo "📋 Data drive recovery process will:"
+        echo "  1. Run 'snapraid fix -d $target_drive' to restore data"
+        echo "  2. Run 'snapraid scrub -d $target_drive' to verify integrity"
+        command="this::snapraid_data_recovery '$target_drive' '$operation_id'"
+    fi
+    
+    echo ""
+    echo "⏱️  Estimated time: 2-8 hours (depends on drive size and system)"
+    echo "📊 Monitor progress: pooltool monitor show $operation_id"
+    echo "📋 View live logs: pooltool monitor logs $operation_id --follow"
+    echo ""
+    
+    if ! pooltool::question -p "Start background recovery process?" -d "y"; then
+        echo "❌ Background recovery cancelled"
+        return 1
+    fi
+    
+    # Start the background process
+    local started_id=$(pooltool::background::process_manager::start_background_process \
+        "drive-recovery" \
+        "$operation_id" \
+        "$command" \
+        "$log_file")
+    
+    if [[ -n "$started_id" ]]; then
+        echo "✅ Background recovery started successfully!"
+        echo ""
+        echo "📋 NEXT STEPS:"
+        echo "  • Monitor: pooltool monitor show $operation_id"
+        echo "  • Live logs: pooltool monitor logs $operation_id --follow"
+        echo "  • Wait for completion: pooltool monitor wait $operation_id"
+        echo ""
+        echo "🔔 You will be notified when the recovery completes."
+        echo "   (Configure notifications in ~/.pooltool/notifications.conf)"
+        
+        # Send initial notification
+        pooltool::background::notifications::send_notification \
+            "$operation_id" \
+            "started" \
+            "medium" \
+            "SnapRAID Recovery Started" \
+            "Drive recovery for $target_drive has begun. This may take several hours."
+            
+        return 0
+    else
+        echo "❌ Failed to start background recovery"
+        return 1
+    fi
+}
+
+#
+# SnapRAID data drive recovery process
+#
+snapraid_data_recovery() {
+    local target_drive="$1"
+    local operation_id="$2"
+    
+    echo "$(date): Starting data recovery for drive $target_drive" >&2
+    echo "$(date): Running snapraid fix -d $target_drive" >&2
+    
+    # Update progress
+    pooltool::background::process_manager::update_process_state \
+        "$operation_id" "running" "Running snapraid fix" "" "25" "100"
+    
+    if snapraid fix -d "$target_drive"; then
+        echo "$(date): SnapRAID fix completed successfully" >&2
+        
+        # Update progress
+        pooltool::background::process_manager::update_process_state \
+            "$operation_id" "running" "Running snapraid scrub" "" "75" "100"
+        
+        echo "$(date): Running snapraid scrub -d $target_drive" >&2
+        
+        if snapraid scrub -d "$target_drive"; then
+            echo "$(date): SnapRAID scrub completed successfully" >&2
+            
+            # Update to completed
+            pooltool::background::process_manager::update_process_state \
+                "$operation_id" "completed" "Recovery completed successfully" "" "100" "100"
+            
+            # Send completion notification
+            pooltool::background::notifications::notify_operation_complete \
+                "$operation_id" "completed"
+            
+            return 0
+        else
+            echo "$(date): SnapRAID scrub failed" >&2
+            pooltool::background::process_manager::update_process_state \
+                "$operation_id" "failed" "SnapRAID scrub failed"
+            
+            pooltool::background::notifications::notify_operation_complete \
+                "$operation_id" "failed"
+            
+            return 1
+        fi
+    else
+        echo "$(date): SnapRAID fix failed" >&2
+        pooltool::background::process_manager::update_process_state \
+            "$operation_id" "failed" "SnapRAID fix failed"
+        
+        pooltool::background::notifications::notify_operation_complete \
+            "$operation_id" "failed"
+        
+        return 1
+    fi
+}
+
+#
+# SnapRAID parity drive recovery process  
+#
+snapraid_parity_recovery() {
+    local target_drive="$1"
+    local operation_id="$2"
+    
+    echo "$(date): Starting parity recovery for drive $target_drive" >&2
+    echo "$(date): Running snapraid sync" >&2
+    
+    # Update progress
+    pooltool::background::process_manager::update_process_state \
+        "$operation_id" "running" "Running snapraid sync" "" "25" "100"
+    
+    if snapraid sync; then
+        echo "$(date): SnapRAID sync completed successfully" >&2
+        
+        # Update progress  
+        pooltool::background::process_manager::update_process_state \
+            "$operation_id" "running" "Running snapraid scrub" "" "75" "100"
+        
+        echo "$(date): Running snapraid scrub" >&2
+        
+        if snapraid scrub; then
+            echo "$(date): SnapRAID scrub completed successfully" >&2
+            
+            # Update to completed
+            pooltool::background::process_manager::update_process_state \
+                "$operation_id" "completed" "Parity recovery completed successfully" "" "100" "100"
+            
+            # Send completion notification
+            pooltool::background::notifications::notify_operation_complete \
+                "$operation_id" "completed"
+            
+            return 0
+        else
+            echo "$(date): SnapRAID scrub failed" >&2
+            pooltool::background::process_manager::update_process_state \
+                "$operation_id" "failed" "SnapRAID scrub failed"
+            
+            pooltool::background::notifications::notify_operation_complete \
+                "$operation_id" "failed"
+            
+            return 1
+        fi
+    else
+        echo "$(date): SnapRAID sync failed" >&2
+        pooltool::background::process_manager::update_process_state \
+            "$operation_id" "failed" "SnapRAID sync failed"
+        
+        pooltool::background::notifications::notify_operation_complete \
+            "$operation_id" "failed"
+        
+        return 1
+    fi
 }
 
 #

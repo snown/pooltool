@@ -1,0 +1,391 @@
+#!/bin/bash
+#NAMESPACE=pooltool::background
+
+# Notification System for PoolTool Background Operations
+# Handles various notification methods for operation completion
+
+dependencies::register_module "pooltool/background/notifications"
+
+#================================================================
+# Configuration and Setup
+#================================================================
+
+function get_notification_config {
+    local config_file="/etc/pooltool/notifications.conf"
+    [[ ! -f "$config_file" ]] && config_file="${HOME}/.pooltool/notifications.conf"
+    
+    # Default configuration
+    local default_config='
+{
+    "enabled": true,
+    "methods": {
+        "console": {
+            "enabled": true,
+            "priority": "all"
+        },
+        "email": {
+            "enabled": false,
+            "smtp_server": "",
+            "smtp_port": 587,
+            "username": "",
+            "password": "",
+            "to_addresses": [],
+            "priority": "high"
+        },
+        "webhook": {
+            "enabled": false,
+            "url": "",
+            "priority": "high"
+        },
+        "desktop": {
+            "enabled": true,
+            "priority": "high"
+        }
+    },
+    "priorities": {
+        "low": ["completed"],
+        "medium": ["failed", "cancelled"],
+        "high": ["critical_failure", "security_alert"],
+        "all": ["completed", "failed", "cancelled", "critical_failure", "security_alert"]
+    }
+}
+'
+    
+    if [[ -f "$config_file" ]]; then
+        cat "$config_file"
+    else
+        echo "$default_config"
+    fi
+}
+
+#================================================================
+# Core Notification Functions
+#================================================================
+
+function send_notification {
+    local operation_id="$1"
+    local event_type="$2"
+    local priority="$3"
+    local title="$4"
+    local message="$5"
+    
+    local config=$(this::get_notification_config)
+    local enabled=$(echo "$config" | jq -r '.enabled')
+    
+    if [[ "$enabled" != "true" ]]; then
+        return 0
+    fi
+    
+    # Send to each enabled notification method
+    local methods=(console desktop email webhook)
+    
+    for method in "${methods[@]}"; do
+        local method_enabled=$(echo "$config" | jq -r ".methods.${method}.enabled")
+        local method_priority=$(echo "$config" | jq -r ".methods.${method}.priority")
+        
+        if [[ "$method_enabled" == "true" ]] && this::should_notify "$priority" "$method_priority" "$event_type" "$config"; then
+            case "$method" in
+                "console")
+                    this::notify_console "$title" "$message" "$event_type"
+                    ;;
+                "desktop")
+                    this::notify_desktop "$title" "$message" "$event_type"
+                    ;;
+                "email")
+                    this::notify_email "$title" "$message" "$operation_id" "$event_type" "$config"
+                    ;;
+                "webhook")
+                    this::notify_webhook "$title" "$message" "$operation_id" "$event_type" "$config"
+                    ;;
+            esac
+        fi
+    done
+}
+
+function should_notify {
+    local priority="$1"
+    local method_priority="$2"
+    local event_type="$3"
+    local config="$4"
+    
+    # Get events for this priority level
+    local priority_events=$(echo "$config" | jq -r ".priorities.${method_priority}[]?" 2>/dev/null)
+    
+    # Check if event type is in the priority list
+    echo "$priority_events" | grep -q "^${event_type}$"
+}
+
+#================================================================
+# Notification Method Implementations
+#================================================================
+
+function notify_console {
+    local title="$1"
+    local message="$2"
+    local event_type="$3"
+    
+    local icon=""
+    local color=""
+    
+    case "$event_type" in
+        "completed")
+            icon="✅"
+            color="\e[32m"  # Green
+            ;;
+        "failed")
+            icon="❌"
+            color="\e[31m"  # Red
+            ;;
+        "cancelled")
+            icon="⚠️ "
+            color="\e[33m"  # Yellow
+            ;;
+        "critical_failure")
+            icon="🚨"
+            color="\e[31;1m"  # Bold Red
+            ;;
+        *)
+            icon="ℹ️ "
+            color="\e[34m"  # Blue
+            ;;
+    esac
+    
+    echo -e "${color}${icon} ${title}\e[0m"
+    echo -e "${color}${message}\e[0m"
+    echo ""
+}
+
+function notify_desktop {
+    local title="$1"
+    local message="$2"
+    local event_type="$3"
+    
+    # Check if we're in a desktop environment
+    if [[ -n "$DISPLAY" ]] && command -v notify-send >/dev/null 2>&1; then
+        local urgency="normal"
+        local icon="info"
+        
+        case "$event_type" in
+            "completed")
+                urgency="low"
+                icon="dialog-information"
+                ;;
+            "failed"|"critical_failure")
+                urgency="critical"
+                icon="dialog-error"
+                ;;
+            "cancelled")
+                urgency="normal"
+                icon="dialog-warning"
+                ;;
+        esac
+        
+        notify-send --urgency="$urgency" --icon="$icon" "$title" "$message"
+    fi
+}
+
+function notify_email {
+    local title="$1"
+    local message="$2"
+    local operation_id="$3"
+    local event_type="$4"
+    local config="$5"
+    
+    local smtp_server=$(echo "$config" | jq -r '.methods.email.smtp_server')
+    local smtp_port=$(echo "$config" | jq -r '.methods.email.smtp_port')
+    local username=$(echo "$config" | jq -r '.methods.email.username')
+    local password=$(echo "$config" | jq -r '.methods.email.password')
+    
+    if [[ -z "$smtp_server" || -z "$username" ]]; then
+        return 1
+    fi
+    
+    # Create email content
+    local email_subject="PoolTool: $title"
+    local email_body="
+Operation: $operation_id
+Status: $event_type
+Time: $(date)
+
+$message
+
+--
+PoolTool Background Process Monitor
+Server: $(hostname)
+"
+    
+    # Get recipient addresses
+    local recipients=($(echo "$config" | jq -r '.methods.email.to_addresses[]'))
+    
+    for recipient in "${recipients[@]}"; do
+        # Use mail command if available, otherwise curl with SMTP
+        if command -v mail >/dev/null 2>&1; then
+            echo "$email_body" | mail -s "$email_subject" "$recipient"
+        elif command -v curl >/dev/null 2>&1; then
+            this::send_smtp_email "$smtp_server" "$smtp_port" "$username" "$password" "$recipient" "$email_subject" "$email_body"
+        fi
+    done
+}
+
+function notify_webhook {
+    local title="$1"
+    local message="$2"
+    local operation_id="$3"
+    local event_type="$4"
+    local config="$5"
+    
+    local webhook_url=$(echo "$config" | jq -r '.methods.webhook.url')
+    
+    if [[ -z "$webhook_url" ]] || ! command -v curl >/dev/null 2>&1; then
+        return 1
+    fi
+    
+    # Create webhook payload
+    local payload=$(jq -n \
+        --arg title "$title" \
+        --arg message "$message" \
+        --arg operation_id "$operation_id" \
+        --arg event_type "$event_type" \
+        --arg timestamp "$(date -Iseconds)" \
+        --arg hostname "$(hostname)" \
+        '{
+            title: $title,
+            message: $message,
+            operation_id: $operation_id,
+            event_type: $event_type,
+            timestamp: $timestamp,
+            hostname: $hostname,
+            service: "pooltool"
+        }')
+    
+    # Send webhook
+    curl -s -X POST \
+        -H "Content-Type: application/json" \
+        -d "$payload" \
+        "$webhook_url" >/dev/null 2>&1
+}
+
+#================================================================
+# Utility Functions
+#================================================================
+
+function send_smtp_email {
+    local smtp_server="$1"
+    local smtp_port="$2"
+    local username="$3"
+    local password="$4"
+    local recipient="$5"
+    local subject="$6"
+    local body="$7"
+    
+    # Basic SMTP implementation using curl
+    local email_data="To: $recipient
+From: $username
+Subject: $subject
+
+$body"
+    
+    curl --url "smtps://${smtp_server}:${smtp_port}" \
+         --ssl-reqd \
+         --mail-from "$username" \
+         --mail-rcpt "$recipient" \
+         --user "${username}:${password}" \
+         --upload-file <(echo "$email_data") \
+         >/dev/null 2>&1
+}
+
+function notify_operation_complete {
+    local operation_id="$1"
+    local final_status="$2"
+    
+    # Get operation details
+    local status_json=$(pooltool::background::process_manager::get_process_status "$operation_id")
+    local operation_type=$(echo "$status_json" | jq -r '.operation_type')
+    local start_time=$(echo "$status_json" | jq -r '.start_time')
+    
+    # Calculate duration
+    local duration_seconds=$(( $(date +%s) - $(date -d "$start_time" +%s) ))
+    local duration_human=$(this::format_duration "$duration_seconds")
+    
+    local title=""
+    local message=""
+    local priority="medium"
+    
+    case "$final_status" in
+        "completed")
+            title="Operation Completed: $operation_type"
+            message="Operation $operation_id completed successfully in $duration_human"
+            priority="low"
+            ;;
+        "failed")
+            title="Operation Failed: $operation_type"
+            message="Operation $operation_id failed after $duration_human. Check logs for details."
+            priority="medium"
+            ;;
+        "cancelled")
+            title="Operation Cancelled: $operation_type"
+            message="Operation $operation_id was cancelled after $duration_human"
+            priority="medium"
+            ;;
+        *)
+            title="Operation Status Update: $operation_type"
+            message="Operation $operation_id status: $final_status"
+            priority="medium"
+            ;;
+    esac
+    
+    this::send_notification "$operation_id" "$final_status" "$priority" "$title" "$message"
+}
+
+function format_duration {
+    local seconds="$1"
+    
+    if [[ $seconds -lt 60 ]]; then
+        echo "${seconds} seconds"
+    elif [[ $seconds -lt 3600 ]]; then
+        local minutes=$((seconds / 60))
+        local remaining_seconds=$((seconds % 60))
+        echo "${minutes}m ${remaining_seconds}s"
+    else
+        local hours=$((seconds / 3600))
+        local remaining_minutes=$(((seconds % 3600) / 60))
+        echo "${hours}h ${remaining_minutes}m"
+    fi
+}
+
+#================================================================
+# Configuration Management
+#================================================================
+
+function create_default_config {
+    local config_dir="/etc/pooltool"
+    local config_file="${config_dir}/notifications.conf"
+    
+    # Try system config first, fall back to user config
+    if ! mkdir -p "$config_dir" 2>/dev/null; then
+        config_dir="${HOME}/.pooltool"
+        config_file="${config_dir}/notifications.conf"
+        mkdir -p "$config_dir"
+    fi
+    
+    if [[ ! -f "$config_file" ]]; then
+        this::get_notification_config > "$config_file"
+        echo "Created default notification configuration: $config_file"
+    fi
+}
+
+function test_notifications {
+    local test_operation_id="test-$(date +%s)"
+    
+    echo "🧪 Testing notification system..."
+    
+    this::send_notification \
+        "$test_operation_id" \
+        "completed" \
+        "low" \
+        "PoolTool Test Notification" \
+        "This is a test notification to verify your notification configuration is working properly."
+    
+    echo "Test notification sent!"
+    echo "Check your configured notification methods to verify delivery."
+}

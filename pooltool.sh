@@ -20,6 +20,8 @@ bootstrap_load_module pooltool/commands/blink
 bootstrap_load_module pooltool/commands/drivemap
 bootstrap_load_module pooltool/commands/health
 bootstrap_load_module pooltool/commands/replace-drive
+bootstrap_load_module pooltool/commands/monitor
+bootstrap_load_module pooltool/commands/test-background
 bootstrap_load_module pooltool/driveutils
 bootstrap_load_module pooltool/drivevisualizer
 bootstrap_load_module pooltool/capacityutils
@@ -49,6 +51,7 @@ COMMANDS:
   health      Check drive health status (supports automation flags)
   blink       Blink drive LEDs to identify drives in snapraid
   replace-drive  Guided workflow for safe drive replacement
+  monitor     Monitor and manage background processes
 
 EXAMPLES:
   pooltool devices                    # Show all snapraid devices
@@ -60,7 +63,8 @@ EXAMPLES:
   pooltool blink                      # Blink all snapraid drives
   pooltool drivemap                   # Show drive bay layout map
   pooltool drivemap --numbered        # Show numbered drive positions  
-  pooltool blink --help               # Show blink command help
+  pooltool replace-drive              # Start drive replacement wizard
+  pooltool monitor                    # Show active background processes
   pooltool find /path/to/search       # Find files in pool
 
 For detailed help on a specific command, use:
@@ -171,6 +175,26 @@ function main {
       cmd_replace "$@"
     else
       echo "'$1' command not currently supported"
+      print_help
+      exit 1
+    fi
+    ;;
+  test-background)
+    if command -v pooltool::commands::test-background &>/dev/null; then
+      shift
+      pooltool::commands::test-background "$@"
+    else
+      echo "'test-background' command not currently supported"
+      print_help
+      exit 1
+    fi
+    ;;
+  monitor)
+    if command -v pooltool::commands::monitor &>/dev/null; then
+      shift
+      pooltool::commands::monitor "$@"
+    else
+      echo "'monitor' command not currently supported"
       print_help
       exit 1
     fi

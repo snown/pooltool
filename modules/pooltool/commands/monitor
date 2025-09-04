@@ -1,0 +1,382 @@
+#!/bin/bash
+#NAMESPACE=pooltool::commands
+
+# PoolTool Monitor Command
+# Provides monitoring and management of background processes
+
+dependencies::depends "pooltool/background/process_manager"
+dependencies::depends "pooltool/background/notifications"
+dependencies::register_module "pooltool/commands/monitor"
+
+function monitor {
+    local action="${1:-status}"
+    shift
+    
+    case "$action" in
+        "status"|"list")
+            this::cmd_monitor_status "$@"
+            ;;
+        "show"|"view")
+            this::cmd_monitor_show "$@"
+            ;;
+        "logs"|"log")
+            this::cmd_monitor_logs "$@"
+            ;;
+        "kill"|"stop")
+            this::cmd_monitor_kill "$@"
+            ;;
+        "wait")
+            this::cmd_monitor_wait "$@"
+            ;;
+        "cleanup")
+            this::cmd_monitor_cleanup "$@"
+            ;;
+        "--help"|"-h"|"help")
+            this::print_help
+            return 0
+            ;;
+        *)
+            echo "❌ Unknown action: $action"
+            echo "Run 'pooltool monitor --help' for usage information."
+            return 1
+            ;;
+    esac
+}
+
+function cmd_monitor_status {
+    echo "🔍 POOLTOOL BACKGROUND PROCESSES"
+    echo "═══════════════════════════════════════════════════════════════════"
+    
+    # Check for process state directory
+    local state_dir="/var/lib/pooltool/processes"
+    [[ ! -d "$state_dir" ]] && state_dir="${HOME}/.pooltool/processes"
+    
+    if [[ ! -d "$state_dir" ]]; then
+        echo "📭 No background process directory found"
+        echo ""
+        echo "💡 Background processes are created when you run:"
+        echo "   • Drive replacement operations with background mode"
+        echo "   • SnapRAID sync/scrub operations in background"
+        echo "   • Large data migrations"
+        echo "   • System maintenance tasks"
+        return 0
+    fi
+    
+    # List active processes
+    local process_files=("$state_dir"/*.json)
+    if [[ ! -f "${process_files[0]}" ]]; then
+        echo "📭 No active background processes"
+        echo ""
+        echo "💡 Background processes will appear here when started"
+        return 0
+    fi
+    
+    printf "%-25s %-15s %-20s %-s\n" "OPERATION ID" "TYPE" "STATUS" "LAST UPDATE"
+    echo "───────────────────────────────────────────────────────────────────"
+    
+    for process_file in "${process_files[@]}"; do
+        [[ -f "$process_file" ]] || continue
+        
+        local operation_id=$(basename "$process_file" .json)
+        
+        if command -v jq >/dev/null 2>&1 && [[ -s "$process_file" ]]; then
+            local operation_type=$(jq -r '.operation_type // "unknown"' "$process_file" 2>/dev/null)
+            local status=$(jq -r '.status // "unknown"' "$process_file" 2>/dev/null)
+            local last_update=$(jq -r '.last_update // "unknown"' "$process_file" 2>/dev/null)
+            
+            # Color coding for status
+            local status_display="$status"
+            case "$status" in
+                "running") status_display="🟢 $status" ;;
+                "failed") status_display="🔴 $status" ;;
+                "completed") status_display="✅ $status" ;;
+                "starting") status_display="🟡 $status" ;;
+            esac
+            
+            printf "%-25s %-15s %-20s %-s\n" \
+                "$operation_id" \
+                "$operation_type" \
+                "$status_display" \
+                "$last_update"
+        else
+            printf "%-25s %-15s %-20s %-s\n" \
+                "$operation_id" \
+                "unknown" \
+                "❓ unknown" \
+                "$(date -r "$process_file" 2>/dev/null || echo 'unknown')"
+        fi
+    done
+    
+    echo ""
+    echo "💡 Use 'pooltool monitor show <id>' for detailed information"
+    echo "💡 Use 'pooltool monitor logs <id>' to view operation logs"
+}
+
+function cmd_monitor_show {
+    local operation_id="$1"
+    
+    if [[ -z "$operation_id" ]]; then
+        echo "❌ Operation ID required"
+        echo "Use 'pooltool monitor status' to see available operations"
+        return 1
+    fi
+    
+    # Check for process state directory
+    local state_dir="/var/lib/pooltool/processes"
+    [[ ! -d "$state_dir" ]] && state_dir="${HOME}/.pooltool/processes"
+    
+    local state_file="${state_dir}/${operation_id}.json"
+    
+    if [[ ! -f "$state_file" ]]; then
+        echo "❌ Operation not found: $operation_id"
+        return 1
+    fi
+    
+    echo "📊 OPERATION DETAILS: $operation_id"
+    echo "═══════════════════════════════════════════════════════════════════"
+    
+    if command -v jq >/dev/null 2>&1; then
+        local operation_type=$(jq -r '.operation_type // "unknown"' "$state_file")
+        local status=$(jq -r '.status // "unknown"' "$state_file")
+        local start_time=$(jq -r '.start_time // "unknown"' "$state_file")
+        local last_update=$(jq -r '.last_update // "unknown"' "$state_file")
+        local pid=$(jq -r '.pid // "unknown"' "$state_file")
+        local log_file=$(jq -r '.log_file // "unknown"' "$state_file")
+        
+        echo "Operation Type: $operation_type"
+        echo "Status: $status"
+        echo "Started: $start_time"
+        echo "Last Update: $last_update"
+        echo "Process ID: $pid"
+        echo "Log File: $log_file"
+        
+        echo ""
+        echo "📈 PROGRESS INFORMATION"
+        echo "───────────────────────────────────────────────────────────────────"
+        
+        local current=$(jq -r '.progress.current // "unknown"' "$state_file")
+        local total=$(jq -r '.progress.total // "unknown"' "$state_file")
+        local message=$(jq -r '.progress.message // "Initializing..."' "$state_file")
+        
+        if [[ "$current" != "null" && "$current" != "unknown" && "$total" != "null" && "$total" != "unknown" ]]; then
+            local percentage=$(echo "scale=1; $current * 100 / $total" | bc 2>/dev/null || echo "0")
+            echo "Progress: ${current}/${total} (${percentage}%)"
+            
+            # Simple progress bar
+            local bar_width=50
+            local filled=$(echo "scale=0; $current * $bar_width / $total" | bc 2>/dev/null || echo "0")
+            local empty=$((bar_width - filled))
+            
+            printf "["
+            printf "%*s" "$filled" | tr ' ' '█'
+            printf "%*s" "$empty" | tr ' ' '░'
+            printf "] ${percentage}%%\n"
+        fi
+        
+        echo "Current Status: $message"
+    else
+        echo "Operation: $operation_id"
+        echo "File: $state_file"
+        echo "Last Modified: $(date -r "$state_file" 2>/dev/null || echo 'unknown')"
+        echo ""
+        echo "⚠️  Install 'jq' for detailed process information"
+    fi
+    
+    echo ""
+    echo "💡 Use 'pooltool monitor logs $operation_id' to view operation logs"
+}
+
+function cmd_monitor_logs {
+    local operation_id="$1"
+    local follow="false"
+    
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            "--follow"|"-f")
+                follow="true"
+                ;;
+        esac
+        shift
+    done
+    
+    if [[ -z "$operation_id" ]]; then
+        echo "❌ Operation ID required"
+        return 1
+    fi
+    
+    echo "📋 OPERATION LOGS: $operation_id"
+    echo "═══════════════════════════════════════════════════════════════════"
+    
+    if [[ "$follow" == "true" ]]; then
+        echo "Following log output (Ctrl+C to stop)..."
+        echo ""
+    fi
+    
+    pooltool::background::process_manager::monitor_process_output "$operation_id" "$follow"
+}
+
+function cmd_monitor_kill {
+    local operation_id="$1"
+    local force="false"
+    
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            "--force"|"-f")
+                force="true"
+                ;;
+        esac
+        shift
+    done
+    
+    if [[ -z "$operation_id" ]]; then
+        echo "❌ Operation ID required"
+        return 1
+    fi
+    
+    echo "⚠️  STOPPING OPERATION: $operation_id"
+    
+    if [[ "$force" != "true" ]]; then
+        echo ""
+        echo "This will terminate the background operation. This may leave"
+        echo "the system in an incomplete state that requires manual cleanup."
+        echo ""
+        read -p "Are you sure you want to stop this operation? (y/N): " confirm
+        
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            echo "Operation cancelled"
+            return 0
+        fi
+    fi
+    
+    if pooltool::background::process_manager::kill_process "$operation_id" "$force"; then
+        echo "✅ Operation stopped: $operation_id"
+    else
+        echo "❌ Failed to stop operation: $operation_id"
+        return 1
+    fi
+}
+
+function cmd_monitor_wait {
+    local operation_id="$1"
+    local timeout=""
+    
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            "--timeout")
+                timeout="$2"
+                shift
+                ;;
+        esac
+        shift
+    done
+    
+    if [[ -z "$operation_id" ]]; then
+        echo "❌ Operation ID required"
+        return 1
+    fi
+    
+    echo "⏳ Waiting for operation to complete: $operation_id"
+    echo "Press Ctrl+C to stop waiting (operation will continue)"
+    echo ""
+    
+    local result=$(pooltool::background::process_manager::wait_for_process "$operation_id" "$timeout")
+    local status=$(echo "$result" | jq -r '.status')
+    
+    case "$status" in
+        "completed")
+            echo "✅ Operation completed successfully!"
+            ;;
+        "failed")
+            echo "❌ Operation failed!"
+            return 1
+            ;;
+        "cancelled")
+            echo "⚠️  Operation was cancelled"
+            return 1
+            ;;
+        *)
+            echo "❓ Operation ended with status: $status"
+            ;;
+    esac
+}
+
+function cmd_monitor_cleanup {
+    local max_age_days="${1:-7}"
+    
+    echo "🧹 CLEANING UP OLD PROCESSES"
+    echo "Removing process records older than $max_age_days days..."
+    
+    pooltool::background::process_manager::cleanup_old_processes "$max_age_days"
+    
+    echo "✅ Cleanup complete"
+}
+
+function print_help {
+    cat << 'EOF'
+🔍 POOLTOOL MONITOR COMMAND
+
+USAGE:
+    pooltool monitor [ACTION] [OPTIONS]
+
+DESCRIPTION:
+    Monitor and manage background processes for long-running operations
+    like drive replacements, SnapRAID operations, and data migrations.
+
+ACTIONS:
+    status, list            Show all active background processes
+    show <id>              Show detailed information about a process
+    logs <id> [--follow]   View process logs (optionally follow)
+    wait <id> [--timeout]  Wait for a process to complete
+    kill <id> [--force]    Stop a running process
+    cleanup [days]         Remove old process records (default: 7 days)
+
+OPTIONS:
+    -h, --help             Show this help message
+    --follow, -f           Follow log output in real-time
+    --force, -f            Force operation without confirmation
+    --timeout <seconds>    Timeout for wait operations
+
+EXAMPLES:
+    pooltool monitor                    # Show active processes
+    pooltool monitor show drive-123     # Show detailed process info
+    pooltool monitor logs drive-123 -f  # Follow process logs
+    pooltool monitor wait drive-123     # Wait for completion
+    pooltool monitor kill drive-123     # Stop a process
+    pooltool monitor cleanup 14         # Clean up records older than 14 days
+
+PROCESS TYPES:
+    drive-replacement      Drive replacement/recovery operations
+    snapraid-sync         SnapRAID synchronization operations
+    snapraid-scrub        SnapRAID scrubbing operations
+    data-migration        Large data movement operations
+    system-maintenance    System maintenance tasks
+
+PROCESS STATES:
+    🟡 starting            Process is initializing
+    🟢 running             Process is actively running
+    ✅ completed           Process finished successfully
+    🔴 failed              Process failed or encountered errors
+    ⚪ cancelled           Process was stopped by user
+
+STORAGE LOCATIONS:
+    Process State:    /var/lib/pooltool/processes/
+    Process Logs:     /var/log/pooltool/
+    Runtime Files:    /var/run/pooltool/
+
+    Note: Falls back to ~/.pooltool/ if system directories not writable
+
+INTEGRATION:
+    Background processes are automatically created by:
+    • pooltool replace-drive (when doing recovery operations)
+    • pooltool snapraid sync --background
+    • pooltool migrate --background
+    • Other long-running maintenance operations
+
+For more information about specific operations, see their respective help:
+    pooltool replace-drive --help
+    pooltool snapraid --help
+EOF
+}

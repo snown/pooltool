@@ -1,0 +1,128 @@
+#!/bin/bash
+#NAMESPACE=pooltool::commands
+
+# Test command for demonstrating background process monitoring
+
+dependencies::register_module "pooltool/commands/test-background"
+
+function test-background {
+    local duration="${1:-10}"
+    
+    echo "🧪 BACKGROUND PROCESS TEST"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo "This will create a test background process that runs for $duration seconds"
+    echo ""
+    
+    # Create process directories
+    local state_dir="${HOME}/.pooltool/processes"
+    local log_dir="${HOME}/.pooltool/logs"
+    mkdir -p "$state_dir" "$log_dir"
+    
+    # Generate operation ID
+    local operation_id="test-$(date +%Y%m%d-%H%M%S)-$$"
+    local state_file="${state_dir}/${operation_id}.json"
+    local log_file="${log_dir}/${operation_id}.log"
+    
+    echo "Operation ID: $operation_id"
+    echo "State File: $state_file"
+    echo "Log File: $log_file"
+    echo ""
+    
+    # Create initial state
+    cat > "$state_file" << EOF
+{
+    "operation_id": "$operation_id",
+    "operation_type": "test-process",
+    "status": "starting",
+    "start_time": "$(date -Iseconds)",
+    "pid": null,
+    "log_file": "$log_file",
+    "progress": {
+        "current": 0,
+        "total": 100,
+        "message": "Initializing test process..."
+    },
+    "last_update": "$(date -Iseconds)"
+}
+EOF
+    
+    echo "✅ Starting background test process..."
+    
+    # Start background process
+    (
+        # Update state to running - simpler approach
+        local temp_file=$(mktemp)
+        jq --arg pid "$$" \
+           --arg timestamp "$(date -Iseconds)" \
+           '.status = "running" | .pid = ($pid | tonumber) | .last_update = $timestamp | .progress.message = "Test process running"' \
+           "$state_file" > "$temp_file" && mv "$temp_file" "$state_file"
+        
+        echo "$(date): Test background process started (PID: $$)" >> "$log_file"
+        
+        # Simulate work with progress updates
+        for i in $(seq 1 "$duration"); do
+            local progress=$((i * 100 / duration))
+            
+            # Update progress - simpler approach
+            local temp_file=$(mktemp)
+            jq --arg progress "$progress" \
+               --arg message "Processing step $i of $duration" \
+               --arg timestamp "$(date -Iseconds)" \
+               '.progress.current = ($progress | tonumber) | .progress.message = $message | .last_update = $timestamp' \
+               "$state_file" > "$temp_file" && mv "$temp_file" "$state_file"
+            
+            echo "$(date): Step $i/$duration completed (${progress}%)" >> "$log_file"
+            sleep 1
+        done
+        
+        # Mark as completed - simpler approach  
+        local temp_file=$(mktemp)
+        jq --arg timestamp "$(date -Iseconds)" \
+           '.status = "completed" | .progress.current = 100 | .progress.message = "Test process completed successfully" | .last_update = $timestamp' \
+           "$state_file" > "$temp_file" && mv "$temp_file" "$state_file"
+        
+        echo "$(date): Test background process completed successfully" >> "$log_file"
+        
+    ) &
+    
+    local bg_pid=$!
+    echo "Background process started with PID: $bg_pid"
+    echo ""
+    echo "📋 MONITORING COMMANDS:"
+    echo "  • Status: pooltool monitor"
+    echo "  • Details: pooltool monitor show $operation_id"
+    echo "  • Logs: pooltool monitor logs $operation_id"
+    echo ""
+    echo "The test will complete in $duration seconds."
+    
+    return 0
+}
+
+function print_help {
+    cat << 'EOF'
+🧪 POOLTOOL BACKGROUND PROCESS TEST
+
+USAGE:
+    pooltool test-background [DURATION]
+
+DESCRIPTION:
+    Creates a test background process to demonstrate the monitoring system.
+    Useful for testing background process tracking and monitoring commands.
+
+ARGUMENTS:
+    DURATION        How long the test should run in seconds (default: 10)
+
+EXAMPLES:
+    pooltool test-background        # Run 10 second test
+    pooltool test-background 30     # Run 30 second test
+
+MONITORING:
+    While the test is running, you can monitor it with:
+    • pooltool monitor              # List all processes
+    • pooltool monitor show <id>    # Show detailed progress
+    • pooltool monitor logs <id>    # View process logs
+
+The test creates real background process state files in ~/.pooltool/processes/
+and logs in ~/.pooltool/logs/ to demonstrate the monitoring system.
+EOF
+}
