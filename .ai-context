@@ -1,0 +1,108 @@
+# AI ASSISTANT CONTEXT - POOLTOOL PROJECT
+
+This file provides essential context for AI assistants working on the PooltTool project.
+
+## MANDATORY READING BEFORE ANY CODE CHANGES
+
+🚨 **STOP**: You MUST read these files before making any modifications:
+
+### 1. DEVELOPER_GUIDE.md
+- Contains critical namespace patterns and coding conventions
+- Explains the bootstrap system's automatic function transformation
+- Shows performance best practices for bulk operations
+- **Violating these patterns WILL break the module system**
+
+### 2. INTERACTIVE_DRIVE_MANAGEMENT_PLAN.md  
+- Project architecture and current implementation status
+- Performance metrics and optimization details
+- Phase-by-phase development progress
+- **Essential for understanding the system design**
+
+### 3. bootstrap.sh
+- Core module loading mechanism
+- Automatic namespace transformation rules
+- **Critical to understand before writing any functions**
+
+## COMMON MISTAKES TO AVOID
+
+❌ **DON'T**: Call bootstrap_load_module directly for testing
+```bash
+bootstrap_load_module snapraid/devices && snapraid::devices names  # WRONG!
+```
+
+✅ **DO**: Use pooltool.sh commands for module testing
+```bash
+./pooltool.sh command-that-uses-module  # CORRECT - proper module loading
+```
+
+❌ **DON'T**: Parse visual layouts for data
+```bash
+# WRONG - visual layout is OUTPUT, not source data
+pooltool drivemap | grep "Position 1"
+```
+
+✅ **DO**: Use driveutils unified mapping for real drive data
+```bash
+# CORRECT - access the actual data source
+./pooltool.sh test-drives  # Shows unified mapping data
+# Then use pooltool::create_unified_mapping in your code
+```
+
+❌ **DON'T**: Use full namespaces in function definitions
+```bash
+### Example Patterns
+```bash
+# WRONG! Full namespace in function definitions
+func pooltool::commands::health::helper {  # WRONG! (pseudo-code)
+    # This triggers validation errors
+}
+
+# CORRECT! Short names with bootstrap transformation
+function helper {  # ✅ CORRECT!
+    # Bootstrap transforms this automatically
+}
+```
+
+✅ **DO**: Use short names, let bootstrap handle namespacing
+```bash
+function helper {  # CORRECT - bootstrap transforms this
+```
+
+❌ **DON'T**: Make individual health calls for multiple drives
+```bash
+for drive in drives; do
+    pooltool::get_drive_health "$drive"  # SLOW - 50+ seconds!
+done
+```
+
+✅ **DO**: Use bulk collection functions
+```bash
+pooltool::get_all_health_info_efficient "$controller" "${unified_array[@]}"  # FAST - 3 seconds!
+```
+
+## PROJECT PRINCIPLES
+
+1. **Performance First**: Always use bulk operations for multi-drive tasks
+2. **Bootstrap Compatibility**: Follow the module/namespace pattern exactly
+3. **Backward Compatibility**: Don't break existing command interfaces
+4. **Documentation**: Update relevant .md files when adding features
+5. **Testing**: Use built-in test commands to verify changes
+
+## CURRENT ARCHITECTURE
+
+- **Module System**: Bootstrap-based with automatic namespace transformation
+- **Data Layer**: Unified device mapping with efficient caching
+- **Performance**: 20x optimization through bulk SMART data collection
+- **UI**: Interactive grid-based drive visualization
+- **Automation**: CLI modes with JSON output and proper exit codes
+
+## GETTING STARTED
+
+1. Read the three mandatory files above
+2. Run `./pooltool.sh` to see the interactive system
+3. Examine existing commands in `modules/pooltool/commands/`
+4. Use test commands like `test-health-simple` for debugging
+5. Follow the patterns in DEVELOPER_GUIDE.md exactly
+
+Remember: This is a production system managing critical storage infrastructure. 
+Follow the established patterns to maintain reliability and performance.

@@ -1,0 +1,321 @@
+#!/bin/bash
+
+# Pooltool Workflow Engine - Core workflow management system
+# Part of Phase 3.2: Advanced Workflows
+# Created: September 4, 2025
+
+NAMESPACE="global"
+
+# Workflow state management
+declare -g WORKFLOW_STATE_DIR="/tmp/pooltool-workflows"
+declare -g WORKFLOW_LOG_DIR="/var/log/pooltool"
+declare -g WORKFLOW_CURRENT_ID=""
+declare -g WORKFLOW_CURRENT_STEP=""
+declare -g WORKFLOW_TOTAL_STEPS=0
+
+# Workflow step status codes
+declare -gr WORKFLOW_STEP_PENDING=0
+declare -gr WORKFLOW_STEP_RUNNING=1
+declare -gr WORKFLOW_STEP_COMPLETE=2
+declare -gr WORKFLOW_STEP_FAILED=3
+declare -gr WORKFLOW_STEP_SKIPPED=4
+
+#
+# Initialize workflow system
+#
+workflow_engine_init() {
+    # Create state directory if it doesn't exist
+    if [[ ! -d "$WORKFLOW_STATE_DIR" ]]; then
+        mkdir -p "$WORKFLOW_STATE_DIR" || {
+            echo "Error: Cannot create workflow state directory: $WORKFLOW_STATE_DIR" >&2
+            return 1
+        }
+    fi
+    
+    # Create log directory if it doesn't exist
+    if [[ ! -d "$WORKFLOW_LOG_DIR" ]]; then
+        if sudo mkdir -p "$WORKFLOW_LOG_DIR" 2>/dev/null; then
+            sudo chmod 755 "$WORKFLOW_LOG_DIR"
+        else
+            # Fallback to user directory if no sudo access
+            WORKFLOW_LOG_DIR="$HOME/.pooltool/logs"
+            mkdir -p "$WORKFLOW_LOG_DIR" || {
+                echo "Warning: Cannot create log directory, logging disabled" >&2
+                WORKFLOW_LOG_DIR=""
+            }
+        fi
+    fi
+    
+    return 0
+}
+
+#
+# Start a new workflow
+# $1: workflow_name (e.g., "drive_replacement")
+# $2: total_steps (number of steps in workflow)
+# Returns: workflow_id
+#
+workflow_start() {
+    local workflow_name="$1"
+    local total_steps="$2"
+    
+    if [[ -z "$workflow_name" || -z "$total_steps" ]]; then
+        echo "Error: workflow_start requires workflow_name and total_steps" >&2
+        return 1
+    fi
+    
+    # Generate unique workflow ID
+    local workflow_id="${workflow_name}_$(date +%Y%m%d_%H%M%S)_$$"
+    
+    # Initialize workflow state
+    WORKFLOW_CURRENT_ID="$workflow_id"
+    WORKFLOW_CURRENT_STEP=0
+    WORKFLOW_TOTAL_STEPS="$total_steps"
+    
+    # Create workflow state file
+    local state_file="$WORKFLOW_STATE_DIR/${workflow_id}.state"
+    {
+        echo "workflow_name=$workflow_name"
+        echo "workflow_id=$workflow_id"
+        echo "total_steps=$total_steps"
+        echo "current_step=0"
+        echo "status=running"
+        echo "started=$(date -Iseconds)"
+    } > "$state_file"
+    
+    # Log workflow start
+    workflow_log "INFO" "Started workflow: $workflow_name (ID: $workflow_id, Steps: $total_steps)"
+    
+    echo "$workflow_id"
+    return 0
+}
+
+#
+# Update workflow step
+# $1: step_number
+# $2: step_name
+# $3: step_status (pending|running|complete|failed|skipped)
+# $4: optional message
+#
+workflow_step() {
+    local step_number="$1"
+    local step_name="$2"
+    local step_status="$3"
+    local message="$4"
+    
+    if [[ -z "$WORKFLOW_CURRENT_ID" ]]; then
+        echo "Error: No active workflow" >&2
+        return 1
+    fi
+    
+    local state_file="$WORKFLOW_STATE_DIR/${WORKFLOW_CURRENT_ID}.state"
+    
+    # Update current step
+    WORKFLOW_CURRENT_STEP="$step_number"
+    
+    # Update state file
+    sed -i "s/current_step=.*/current_step=$step_number/" "$state_file"
+    echo "step_${step_number}_name=$step_name" >> "$state_file"
+    echo "step_${step_number}_status=$step_status" >> "$state_file"
+    echo "step_${step_number}_timestamp=$(date -Iseconds)" >> "$state_file"
+    
+    if [[ -n "$message" ]]; then
+        echo "step_${step_number}_message=$message" >> "$state_file"
+    fi
+    
+    # Log step update
+    local log_level="INFO"
+    case "$step_status" in
+        "failed") log_level="ERROR" ;;
+        "running") log_level="INFO" ;;
+        "complete") log_level="INFO" ;;
+    esac
+    
+    workflow_log "$log_level" "Step $step_number/$WORKFLOW_TOTAL_STEPS: $step_name - $step_status"
+    if [[ -n "$message" ]]; then
+        workflow_log "$log_level" "  Message: $message"
+    fi
+    
+    return 0
+}
+
+#
+# Complete workflow
+# $1: status (success|failed|aborted)
+# $2: optional message
+#
+workflow_complete() {
+    local status="$1"
+    local message="$2"
+    
+    if [[ -z "$WORKFLOW_CURRENT_ID" ]]; then
+        echo "Error: No active workflow" >&2
+        return 1
+    fi
+    
+    local state_file="$WORKFLOW_STATE_DIR/${WORKFLOW_CURRENT_ID}.state"
+    
+    # Update state file
+    sed -i "s/status=.*/status=$status/" "$state_file"
+    echo "completed=$(date -Iseconds)" >> "$state_file"
+    
+    if [[ -n "$message" ]]; then
+        echo "completion_message=$message" >> "$state_file"
+    fi
+    
+    # Log completion
+    local log_level="INFO"
+    [[ "$status" == "failed" ]] && log_level="ERROR"
+    
+    workflow_log "$log_level" "Workflow completed: $status"
+    if [[ -n "$message" ]]; then
+        workflow_log "$log_level" "  Message: $message"
+    fi
+    
+    # Clean up active workflow state
+    WORKFLOW_CURRENT_ID=""
+    WORKFLOW_CURRENT_STEP=""
+    WORKFLOW_TOTAL_STEPS=0
+    
+    return 0
+}
+
+#
+# Display workflow progress
+#
+workflow_progress() {
+    if [[ -z "$WORKFLOW_CURRENT_ID" ]]; then
+        echo "No active workflow"
+        return 1
+    fi
+    
+    echo "Workflow Progress: Step $WORKFLOW_CURRENT_STEP/$WORKFLOW_TOTAL_STEPS"
+    
+    # Create progress bar
+    local progress_width=40
+    local completed_steps=$((WORKFLOW_CURRENT_STEP * progress_width / WORKFLOW_TOTAL_STEPS))
+    local remaining_steps=$((progress_width - completed_steps))
+    
+    printf "["
+    printf "%*s" "$completed_steps" "" | tr ' ' '▓'
+    printf "%*s" "$remaining_steps" "" | tr ' ' '░'
+    printf "] %d%%\n" $((WORKFLOW_CURRENT_STEP * 100 / WORKFLOW_TOTAL_STEPS))
+    
+    return 0
+}
+
+#
+# Log workflow messages
+# $1: level (INFO|WARN|ERROR|DEBUG)
+# $2: message
+#
+workflow_log() {
+    local level="$1"
+    local message="$2"
+    local timestamp=$(date -Iseconds)
+    
+    # Log to console with color coding
+    case "$level" in
+        "ERROR") echo -e "\033[31m[$timestamp] $level: $message\033[0m" >&2 ;;
+        "WARN")  echo -e "\033[33m[$timestamp] $level: $message\033[0m" >&2 ;;
+        "INFO")  echo -e "\033[32m[$timestamp] $level: $message\033[0m" ;;
+        "DEBUG") echo -e "\033[36m[$timestamp] $level: $message\033[0m" ;;
+        *)       echo "[$timestamp] $level: $message" ;;
+    esac
+    
+    # Log to file if directory available
+    if [[ -n "$WORKFLOW_LOG_DIR" && -d "$WORKFLOW_LOG_DIR" ]]; then
+        local log_file="$WORKFLOW_LOG_DIR/workflow.log"
+        echo "[$timestamp] $level: $message" >> "$log_file"
+    fi
+    
+    return 0
+}
+
+#
+# Get workflow status
+# $1: optional workflow_id (defaults to current)
+#
+workflow_status() {
+    local workflow_id="${1:-$WORKFLOW_CURRENT_ID}"
+    
+    if [[ -z "$workflow_id" ]]; then
+        echo "Error: No workflow ID specified and no active workflow" >&2
+        return 1
+    fi
+    
+    local state_file="$WORKFLOW_STATE_DIR/${workflow_id}.state"
+    
+    if [[ ! -f "$state_file" ]]; then
+        echo "Error: Workflow state file not found: $state_file" >&2
+        return 1
+    fi
+    
+    # Source state file and display status
+    (
+        source "$state_file"
+        echo "Workflow: $workflow_name"
+        echo "ID: $workflow_id"
+        echo "Status: $status"
+        echo "Progress: $current_step/$total_steps steps"
+        echo "Started: $started"
+        [[ -n "$completed" ]] && echo "Completed: $completed"
+    )
+    
+    return 0
+}
+
+#
+# List all workflows
+#
+workflow_list() {
+    if [[ ! -d "$WORKFLOW_STATE_DIR" ]]; then
+        echo "No workflows found"
+        return 0
+    fi
+    
+    local state_files=("$WORKFLOW_STATE_DIR"/*.state)
+    
+    if [[ ! -f "${state_files[0]}" ]]; then
+        echo "No workflows found"
+        return 0
+    fi
+    
+    printf "%-30s %-20s %-10s %-15s\n" "WORKFLOW ID" "NAME" "STATUS" "PROGRESS"
+    printf "%-30s %-20s %-10s %-15s\n" "$(printf '%*s' 30 '' | tr ' ' '-')" "$(printf '%*s' 20 '' | tr ' ' '-')" "$(printf '%*s' 10 '' | tr ' ' '-')" "$(printf '%*s' 15 '' | tr ' ' '-')"
+    
+    for state_file in "${state_files[@]}"; do
+        (
+            source "$state_file"
+            printf "%-30s %-20s %-10s %-15s\n" "$workflow_id" "$workflow_name" "$status" "$current_step/$total_steps"
+        )
+    done
+    
+    return 0
+}
+
+#
+# Clean up old workflows
+# $1: days_old (default: 30)
+#
+workflow_cleanup() {
+    local days_old="${1:-30}"
+    
+    if [[ ! -d "$WORKFLOW_STATE_DIR" ]]; then
+        return 0
+    fi
+    
+    # Find and remove old state files
+    find "$WORKFLOW_STATE_DIR" -name "*.state" -mtime +$days_old -delete 2>/dev/null
+    
+    # Clean up old log files
+    if [[ -n "$WORKFLOW_LOG_DIR" && -d "$WORKFLOW_LOG_DIR" ]]; then
+        find "$WORKFLOW_LOG_DIR" -name "*.log" -mtime +$days_old -delete 2>/dev/null
+    fi
+    
+    workflow_log "INFO" "Cleaned up workflows older than $days_old days"
+    return 0
+}
+
+# Initialize workflow engine when module is loaded
+workflow_engine_init

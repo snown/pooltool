@@ -1,7 +1,22 @@
-# pooltool
+# pooltool - Interactive Drive Management System
+
+## 🤖 **FOR AI AGENTS: REQUIRED READING**
+
+**⚠️ CRITICAL: Before making ANY changes to this codebase, you MUST read these files:**
+
+1. **[DEVELOPER_GUIDE.md](./DEVELOPER_GUIDE.md)** - Module patterns, namespace conventions, performance best practices
+2. **[INTERACTIVE_DRIVE_MANAGEMENT_PLAN.md](./INTERACTIVE_DRIVE_MANAGEMENT_PLAN.md)** - Architecture overview and implementation status  
+3. **[bootstrap.sh](./bootstrap.sh)** - Understand the module loading system
+
+**Key Rules for AI Agents:**
+- ✅ Always follow the namespace pattern in DEVELOPER_GUIDE.md
+- ✅ Use bulk health collection functions (not per-drive calls)
+- ✅ Test changes with existing test commands in pooltool.sh
+- ❌ Never use full namespaces in function definitions
+- ❌ Never make individual arcconf calls for multiple drives
 
 ## Overview
-`pooltool` is a modular Bash-based utility for managing files and disks in a RAID storage environment. It provides commands for finding, copying, moving files, and managing disks and SnapRAID devices. All functionality is contained within this directory and its subfolders.
+`pooltool` is a modular Bash-based utility for managing files and disks in a RAID storage environment. It provides commands for finding, copying, moving files, and managing disks and SnapRAID devices, with advanced interactive drive management and health monitoring capabilities.
 
 ## Usage
 

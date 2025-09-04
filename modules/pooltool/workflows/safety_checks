@@ -1,0 +1,497 @@
+#!/bin/bash
+
+# Pooltool Safety Checks - Pre-flight validation and safety systems
+# Part of Phase 3.2: Advanced Workflows
+# Created: September 4, 2025
+
+NAMESPACE="global"
+
+# Safety check result codes
+declare -gr SAFETY_CHECK_PASS=0
+declare -gr SAFETY_CHECK_WARN=1
+declare -gr SAFETY_CHECK_FAIL=2
+declare -gr SAFETY_CHECK_CRITICAL=3
+
+#
+# Initialize safety check system
+#
+safety_init() {
+    # Load required modules
+    bootstrap_load_module pooltool/driveutils
+    bootstrap_load_module pooltool/healthutils
+    bootstrap_load_module pooltool/capacityutils
+    bootstrap_load_module pooltool/ask_question
+    
+    return 0
+}
+
+#
+# Run comprehensive pre-flight safety checks
+# $1: operation_type (replace_drive|bulk_operation|maintenance)
+# $2: target_drives (comma-separated position numbers or "all")
+# Returns: safety check result code
+#
+safety_preflight_check() {
+    local operation_type="$1"
+    local target_drives="$2"
+    
+    echo "🛡️  Running Pre-flight Safety Checks..."
+    echo "════════════════════════════════════════"
+    
+    local overall_result=$SAFETY_CHECK_PASS
+    local check_count=0
+    local pass_count=0
+    local warn_count=0
+    local fail_count=0
+    
+    # System accessibility check
+    echo -n "📡 System Access: "
+    if safety_check_system_access; then
+        echo "✅ PASS"
+        ((pass_count++))
+    else
+        echo "❌ FAIL"
+        overall_result=$SAFETY_CHECK_FAIL
+        ((fail_count++))
+    fi
+    ((check_count++))
+    
+    # SnapRAID array status check
+    echo -n "🗄️  Array Status: "
+    local array_result
+    array_result=$(safety_check_array_status)
+    case $? in
+        $SAFETY_CHECK_PASS)
+            echo "✅ PASS - $array_result"
+            ((pass_count++))
+            ;;
+        $SAFETY_CHECK_WARN)
+            echo "⚠️  WARN - $array_result"
+            [[ $overall_result -lt $SAFETY_CHECK_WARN ]] && overall_result=$SAFETY_CHECK_WARN
+            ((warn_count++))
+            ;;
+        $SAFETY_CHECK_FAIL)
+            echo "❌ FAIL - $array_result"
+            overall_result=$SAFETY_CHECK_FAIL
+            ((fail_count++))
+            ;;
+    esac
+    ((check_count++))
+    
+    # Drive accessibility check for target drives
+    if [[ "$target_drives" != "all" ]]; then
+        echo -n "💽 Target Drives: "
+        local drive_result
+        drive_result=$(safety_check_drive_access "$target_drives")
+        case $? in
+            $SAFETY_CHECK_PASS)
+                echo "✅ PASS - $drive_result"
+                ((pass_count++))
+                ;;
+            $SAFETY_CHECK_WARN)
+                echo "⚠️  WARN - $drive_result"
+                [[ $overall_result -lt $SAFETY_CHECK_WARN ]] && overall_result=$SAFETY_CHECK_WARN
+                ((warn_count++))
+                ;;
+            $SAFETY_CHECK_FAIL)
+                echo "❌ FAIL - $drive_result"
+                overall_result=$SAFETY_CHECK_FAIL
+                ((fail_count++))
+                ;;
+        esac
+        ((check_count++))
+    fi
+    
+    # Critical health check
+    echo -n "🏥 Health Status: "
+    local health_result
+    health_result=$(safety_check_critical_health "$target_drives")
+    case $? in
+        $SAFETY_CHECK_PASS)
+            echo "✅ PASS - $health_result"
+            ((pass_count++))
+            ;;
+        $SAFETY_CHECK_WARN)
+            echo "⚠️  WARN - $health_result"
+            [[ $overall_result -lt $SAFETY_CHECK_WARN ]] && overall_result=$SAFETY_CHECK_WARN
+            ((warn_count++))
+            ;;
+        $SAFETY_CHECK_CRITICAL)
+            echo "🚨 CRITICAL - $health_result"
+            overall_result=$SAFETY_CHECK_CRITICAL
+            ((fail_count++))
+            ;;
+    esac
+    ((check_count++))
+    
+    # Capacity safety check
+    echo -n "📊 Capacity Safety: "
+    local capacity_result
+    capacity_result=$(safety_check_capacity_safety "$target_drives")
+    case $? in
+        $SAFETY_CHECK_PASS)
+            echo "✅ PASS - $capacity_result"
+            ((pass_count++))
+            ;;
+        $SAFETY_CHECK_WARN)
+            echo "⚠️  WARN - $capacity_result"
+            [[ $overall_result -lt $SAFETY_CHECK_WARN ]] && overall_result=$SAFETY_CHECK_WARN
+            ((warn_count++))
+            ;;
+        $SAFETY_CHECK_FAIL)
+            echo "❌ FAIL - $capacity_result"
+            overall_result=$SAFETY_CHECK_FAIL
+            ((fail_count++))
+            ;;
+    esac
+    ((check_count++))
+    
+    # Operation-specific checks
+    case "$operation_type" in
+        "replace_drive")
+            echo -n "🔄 Replacement Readiness: "
+            local replace_result
+            replace_result=$(safety_check_replacement_readiness "$target_drives")
+            case $? in
+                $SAFETY_CHECK_PASS)
+                    echo "✅ PASS - $replace_result"
+                    ((pass_count++))
+                    ;;
+                $SAFETY_CHECK_WARN)
+                    echo "⚠️  WARN - $replace_result"
+                    [[ $overall_result -lt $SAFETY_CHECK_WARN ]] && overall_result=$SAFETY_CHECK_WARN
+                    ((warn_count++))
+                    ;;
+                $SAFETY_CHECK_FAIL)
+                    echo "❌ FAIL - $replace_result"
+                    overall_result=$SAFETY_CHECK_FAIL
+                    ((fail_count++))
+                    ;;
+            esac
+            ((check_count++))
+            ;;
+    esac
+    
+    echo ""
+    echo "📋 Safety Check Summary:"
+    echo "────────────────────────"
+    echo "Total Checks: $check_count"
+    echo "✅ Passed: $pass_count"
+    [[ $warn_count -gt 0 ]] && echo "⚠️  Warnings: $warn_count"
+    [[ $fail_count -gt 0 ]] && echo "❌ Failed: $fail_count"
+    
+    case $overall_result in
+        $SAFETY_CHECK_PASS)
+            echo ""
+            echo "🟢 SAFETY STATUS: ALL CLEAR - Operation can proceed safely"
+            ;;
+        $SAFETY_CHECK_WARN)
+            echo ""
+            echo "🟡 SAFETY STATUS: WARNINGS DETECTED - Review warnings before proceeding"
+            ;;
+        $SAFETY_CHECK_FAIL)
+            echo ""
+            echo "🔴 SAFETY STATUS: CHECKS FAILED - Operation should not proceed"
+            ;;
+        $SAFETY_CHECK_CRITICAL)
+            echo ""
+            echo "🚨 SAFETY STATUS: CRITICAL ISSUES - Immediate attention required"
+            ;;
+    esac
+    
+    return $overall_result
+}
+
+#
+# Check basic system access (arcconf, drives, permissions)
+#
+safety_check_system_access() {
+    # Check if arcconf is available
+    if ! command -v arcconf >/dev/null 2>&1; then
+        echo "arcconf command not found"
+        return $SAFETY_CHECK_FAIL
+    fi
+    
+    # Test arcconf access
+    if ! arcconf getconfig 1 >/dev/null 2>&1; then
+        echo "Cannot access RAID controller"
+        return $SAFETY_CHECK_FAIL
+    fi
+    
+    # Check drive mapping availability
+    if ! get_unified_device_mapping >/dev/null 2>&1; then
+        echo "Cannot access drive mapping"
+        return $SAFETY_CHECK_FAIL
+    fi
+    
+    return $SAFETY_CHECK_PASS
+}
+
+#
+# Check SnapRAID array status
+#
+safety_check_array_status() {
+    # Note: This is a placeholder for SnapRAID integration
+    # In a full implementation, this would check:
+    # - Last sync status and age
+    # - Parity drive health
+    # - Array configuration validity
+    
+    echo "Array status check not yet implemented"
+    return $SAFETY_CHECK_WARN
+}
+
+#
+# Check drive accessibility for target drives
+# $1: comma-separated position numbers
+#
+safety_check_drive_access() {
+    local target_drives="$1"
+    local accessible_count=0
+    local total_count=0
+    local issues=()
+    
+    # Parse target drives
+    IFS=',' read -ra DRIVE_POSITIONS <<< "$target_drives"
+    
+    for position in "${DRIVE_POSITIONS[@]}"; do
+        ((total_count++))
+        
+        # Get drive info for position
+        local drive_info
+        if drive_info=$(get_drive_info_by_position "$position" 2>/dev/null); then
+            ((accessible_count++))
+        else
+            issues+=("Position $position not accessible")
+        fi
+    done
+    
+    if [[ $accessible_count -eq $total_count ]]; then
+        echo "All $total_count drives accessible"
+        return $SAFETY_CHECK_PASS
+    elif [[ $accessible_count -gt 0 ]]; then
+        echo "$accessible_count/$total_count drives accessible (${issues[*]})"
+        return $SAFETY_CHECK_WARN
+    else
+        echo "No drives accessible (${issues[*]})"
+        return $SAFETY_CHECK_FAIL
+    fi
+}
+
+#
+# Check for critical health issues
+# $1: target drives or "all"
+#
+safety_check_critical_health() {
+    local target_drives="$1"
+    local critical_count=0
+    local warning_count=0
+    local total_count=0
+    local critical_drives=()
+    
+    # Get health info for all drives
+    local health_data
+    if ! health_data=$(get_all_health_info_efficient 2>/dev/null); then
+        echo "Cannot retrieve health data"
+        return $SAFETY_CHECK_FAIL
+    fi
+    
+    # Parse health data and check for critical issues
+    while IFS=: read -r drive_name status temp hours sectors; do
+        ((total_count++))
+        
+        case "$status" in
+            "critical")
+                ((critical_count++))
+                critical_drives+=("$drive_name")
+                ;;
+            "warning")
+                ((warning_count++))
+                ;;
+        esac
+    done <<< "$health_data"
+    
+    if [[ $critical_count -gt 0 ]]; then
+        echo "$critical_count critical drives detected: ${critical_drives[*]}"
+        return $SAFETY_CHECK_CRITICAL
+    elif [[ $warning_count -gt 0 ]]; then
+        echo "$warning_count drives with warnings"
+        return $SAFETY_CHECK_WARN
+    else
+        echo "All $total_count drives healthy"
+        return $SAFETY_CHECK_PASS
+    fi
+}
+
+#
+# Check capacity safety (space availability, critical drives)
+# $1: target drives or "all"
+#
+safety_check_capacity_safety() {
+    local target_drives="$1"
+    local critical_count=0
+    local warning_count=0
+    local total_count=0
+    local critical_drives=()
+    
+    # Get all drive capacity info
+    while read -r line; do
+        if [[ "$line" =~ ^[A-Z][A-Z][A-Z][0-9]+ ]]; then
+            local drive_name=$(echo "$line" | awk '{print $1}')
+            local usage_percent=$(echo "$line" | grep -o '[0-9]\+%' | tr -d '%')
+            
+            if [[ -n "$usage_percent" ]]; then
+                ((total_count++))
+                
+                if [[ $usage_percent -ge 95 ]]; then
+                    ((critical_count++))
+                    critical_drives+=("$drive_name ($usage_percent%)")
+                elif [[ $usage_percent -ge 85 ]]; then
+                    ((warning_count++))
+                fi
+            fi
+        fi
+    done < <(get_all_capacity_info 2>/dev/null)
+    
+    if [[ $critical_count -gt 0 ]]; then
+        echo "$critical_count drives critically full: ${critical_drives[*]}"
+        return $SAFETY_CHECK_FAIL
+    elif [[ $warning_count -gt 0 ]]; then
+        echo "$warning_count drives above 85% capacity"
+        return $SAFETY_CHECK_WARN
+    else
+        echo "All drive capacities within safe limits"
+        return $SAFETY_CHECK_PASS
+    fi
+}
+
+#
+# Check readiness for drive replacement operation
+# $1: drive position to replace
+#
+safety_check_replacement_readiness() {
+    local drive_position="$1"
+    
+    # Check if drive exists
+    local drive_info
+    if ! drive_info=$(get_drive_info_by_position "$drive_position" 2>/dev/null); then
+        echo "Drive at position $drive_position not found"
+        return $SAFETY_CHECK_FAIL
+    fi
+    
+    # Extract drive name
+    local drive_name=$(echo "$drive_info" | head -1 | awk '{print $1}')
+    
+    # Check if drive is mounted (would require unmounting)
+    if mount | grep -q "/dev/.*$drive_name"; then
+        echo "Drive $drive_name is currently mounted"
+        return $SAFETY_CHECK_WARN
+    fi
+    
+    # Check if drive is part of active array operations
+    # Note: This would check for ongoing SnapRAID operations
+    # For now, just return a warning to be safe
+    echo "Drive $drive_name ready for replacement (verify no active operations)"
+    return $SAFETY_CHECK_WARN
+}
+
+#
+# Get drive information by position number
+# $1: position number (1-24)
+#
+get_drive_info_by_position() {
+    local position="$1"
+    
+    # Use existing drive mapping system
+    local device_mapping
+    device_mapping=$(get_unified_device_mapping)
+    
+    # Calculate connector and device from position
+    local connector=$(( (position - 1) / 4 ))
+    local device=$(( 4 - ((position - 1) % 4) ))
+    
+    # Find drive at this position
+    while IFS='|' read -r drive_name device_path connector_num device_num model; do
+        if [[ "$connector_num" == "$connector" && "$device_num" == "$device" ]]; then
+            echo "$drive_name $device_path $model"
+            return 0
+        fi
+    done <<< "$device_mapping"
+    
+    return 1
+}
+
+#
+# Prompt user for safety confirmation
+# $1: operation description
+# $2: risk level (low|medium|high|critical)
+# $3: additional details (optional)
+#
+safety_confirm_operation() {
+    local operation="$1"
+    local risk_level="$2"
+    local details="$3"
+    
+    echo ""
+    echo "⚠️  SAFETY CONFIRMATION REQUIRED"
+    echo "═══════════════════════════════════"
+    echo "Operation: $operation"
+    
+    case "$risk_level" in
+        "low")
+            echo "Risk Level: 🟢 LOW - Minimal risk of data loss"
+            ;;
+        "medium")
+            echo "Risk Level: 🟡 MEDIUM - Some risk, backup recommended"
+            ;;
+        "high")
+            echo "Risk Level: 🟠 HIGH - Significant risk, backup required"
+            ;;
+        "critical")
+            echo "Risk Level: 🔴 CRITICAL - High risk of data loss"
+            ;;
+    esac
+    
+    if [[ -n "$details" ]]; then
+        echo ""
+        echo "Details:"
+        echo "$details"
+    fi
+    
+    echo ""
+    echo "🛡️  Safety Recommendations:"
+    echo "• Ensure you have recent backups"
+    echo "• Verify no critical operations are running"
+    echo "• Have a recovery plan ready"
+    echo "• Consider running during maintenance window"
+    
+    echo ""
+    local confirm_text
+    case "$risk_level" in
+        "critical")
+            confirm_text="I understand the risks and want to proceed"
+            ;;
+        *)
+            confirm_text="yes"
+            ;;
+    esac
+    
+    if pooltool::question -p "Do you want to proceed? Type '$confirm_text' to continue" -d "no"; then
+        local user_input
+        user_input=$(bashful input -p "Confirmation: " -d "")
+        
+        if [[ "$user_input" == "$confirm_text" ]]; then
+            echo "✅ Operation confirmed by user"
+            return 0
+        else
+            echo "❌ Confirmation text did not match - operation cancelled"
+            return 1
+        fi
+    else
+        echo "❌ Operation cancelled by user"
+        return 1
+    fi
+}
+
+# Initialize safety system when module loads
+safety_init

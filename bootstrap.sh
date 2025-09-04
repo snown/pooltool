@@ -1,4 +1,17 @@
 #!/bin/bash
+#
+# PooltTool Bootstrap System
+# 
+# ⚠️  CRITICAL FOR AI ASSISTANTS: This file implements automatic namespace transformation!
+#
+# When modules declare #NAMESPACE=pooltool::commands, this system automatically:
+# 1. Transforms "function name {" → "function pooltool::commands::name {"  
+# 2. Transforms "this::helper" → "pooltool::commands::name::helper"
+# 3. Creates proper namespacing without verbose function names in source
+#
+# See DEVELOPER_GUIDE.md for the correct patterns to use when writing modules.
+# DO NOT modify functions to use full namespaces - let this system handle it!
+#
 
 function bootstrap_load_environment
 {

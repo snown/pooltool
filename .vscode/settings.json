@@ -1,0 +1,20 @@
+{
+    "files.associations": {
+        "DEVELOPER_GUIDE.md": "markdown",
+        "*.plan.md": "markdown"
+    },
+    "markdown.extension.toc.levels": "1..6",
+    "editor.rulers": [80, 120],
+    "files.watcherExclude": {
+        "**/modules/**/cache/**": true
+    },
+    "search.exclude": {
+        "**/node_modules": true,
+        "**/cache": true
+    },
+    "ai.context.files": [
+        "DEVELOPER_GUIDE.md",
+        "INTERACTIVE_DRIVE_MANAGEMENT_PLAN.md",
+        "bootstrap.sh"
+    ]
+}

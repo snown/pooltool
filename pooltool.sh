@@ -19,6 +19,7 @@ bootstrap_load_module pooltool/commands/disk
 bootstrap_load_module pooltool/commands/blink
 bootstrap_load_module pooltool/commands/drivemap
 bootstrap_load_module pooltool/commands/health
+bootstrap_load_module pooltool/commands/replace-drive
 bootstrap_load_module pooltool/driveutils
 bootstrap_load_module pooltool/drivevisualizer
 bootstrap_load_module pooltool/capacityutils
@@ -47,6 +48,7 @@ COMMANDS:
   select      Interactive drive selection interface
   health      Check drive health status (supports automation flags)
   blink       Blink drive LEDs to identify drives in snapraid
+  replace-drive  Guided workflow for safe drive replacement
 
 EXAMPLES:
   pooltool devices                    # Show all snapraid devices
@@ -162,6 +164,16 @@ function main {
   health)
     shift
     pooltool::commands::health "$@"
+    ;;
+  replace-drive)
+    if command -v cmd_replace &>/dev/null; then
+      shift
+      cmd_replace "$@"
+    else
+      echo "'$1' command not currently supported"
+      print_help
+      exit 1
+    fi
     ;;
   select)
     echo "Interactive Drive Selection"
@@ -1390,6 +1402,92 @@ function main {
       pooltool::render_drive_grid_enhanced "PHYSICAL_LAYOUT" "mount" "" true false false true "${unified_array[@]}"
     else
       echo "No unified data available"
+    fi
+    ;;
+  test-health-compare)
+    echo "Testing health command comparison..."
+    position="${2:-3}"
+    controller="${3:-1}"
+    
+    echo "=== TESTING HEALTH COMPARISON FOR POSITION $position ==="
+    echo
+    
+    # Test 1: Working select h3 command
+    echo "1. Testing working select h$position command:"
+    echo "────────────────────────────────────────────────"
+    echo "h$position" | pooltool select
+    
+    echo
+    echo "2. Testing standalone health $position command:"
+    echo "────────────────────────────────────────────────"
+    pooltool health "$position"
+    
+    echo
+    echo "3. Direct health function test:"
+    echo "────────────────────────────────────────────────"
+    # Get unified data like both commands do
+    unified_data=$(pooltool::create_unified_mapping "$controller" 2>/dev/null)
+    if [[ -n "$unified_data" ]]; then
+      mapfile -t unified_array <<< "$unified_data"
+      
+      # Find drive at position using same logic as working code
+      for record in "${unified_array[@]}"; do
+        if [[ "$record" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*):([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+          local rec_connector="${BASH_REMATCH[3]}"
+          local rec_device="${BASH_REMATCH[4]}"
+          local calc_position=$(( rec_connector * 4 + (4 - rec_device) ))
+          
+          if [[ "$calc_position" == "$position" ]]; then
+            local system_device="${BASH_REMATCH[6]}"
+            local mount_name="${BASH_REMATCH[1]}"
+            
+            echo "Found drive: $mount_name at $system_device"
+            echo "Calling: pooltool::get_drive_health \"$system_device\" \"$controller\""
+            
+            health_result=$(pooltool::get_drive_health "$system_device" "$controller")
+            echo "Raw result: $health_result"
+            
+            if [[ "$health_result" =~ ^([^:]+):([^:]+):([^:]+):([^:]+)$ ]]; then
+              echo "Parsed: status=${BASH_REMATCH[1]}, temp=${BASH_REMATCH[2]}, hours=${BASH_REMATCH[3]}, sectors=${BASH_REMATCH[4]}"
+            else
+              echo "Failed to parse health result"
+            fi
+            break
+          fi
+        fi
+      done
+    else
+      echo "Failed to get unified data"
+    fi
+    
+    echo
+    echo "=== COMPARISON COMPLETE ==="
+    ;;
+  test-health-simple)
+    echo "Testing health function availability..."
+    
+    echo "1. Checking if health function exists:"
+    if command -v pooltool::commands::health &>/dev/null; then
+      echo "✅ pooltool::commands::health function found"
+    else
+      echo "❌ pooltool::commands::health function NOT found"
+    fi
+    
+    echo
+    echo "2. Listing available pooltool::commands:: functions:"
+    declare -F | grep "pooltool::commands::" | head -5
+    
+    echo
+    echo "3. Testing health module bootstrap:"
+    bootstrap_load_module pooltool/commands/health
+    echo "Health module loaded"
+    
+    if command -v pooltool::commands::health &>/dev/null; then
+      echo "✅ pooltool::commands::health function found after bootstrap"
+      echo "4. Testing simple health call:"
+      pooltool::commands::health --help 2>&1 | head -5
+    else
+      echo "❌ pooltool::commands::health function STILL NOT found"
     fi
     ;;
   -h|--help)

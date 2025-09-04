@@ -23,19 +23,20 @@ declare -g HEALTH_QUIET=false
 declare -g HEALTH_VERBOSE=false
 declare -g HEALTH_JSON=false
 declare -g HEALTH_NO_COLOR=false
+declare -g HEALTH_TARGET=""
 
 #-------------------------------------------------------------------------------
 # Print health command help
 #-------------------------------------------------------------------------------
-function health::print_help {
+function print_help {
     cat << 'EOF'
-USAGE: pooltool health [OPTIONS] [POSITION|--all]
+USAGE: pooltool health [OPTIONS] [POSITION]
 
 Check drive health status with automation support.
 
 ARGUMENTS:
-  POSITION          Drive position number (1-24) to check
-  --all             Check all drives in the system
+  POSITION          Drive position number (1-24) to check specific drive
+                    (If no position specified, checks all drives)
 
 OPTIONS:
   -q, --quiet       Minimal output for automation scripts
@@ -52,11 +53,11 @@ EXIT CODES:
   5                 Hardware error (arcconf failure)
 
 EXAMPLES:
+  pooltool health                      # Check all drives (default)
   pooltool health 5                    # Check drive at position 5
-  pooltool health --all                # Check all drives
-  pooltool health --all --quiet        # Minimal output for scripts
+  pooltool health --quiet              # Check all drives, minimal output
   pooltool health 12 --json           # JSON output for position 12
-  pooltool health --all --no-color    # Plain text for logs
+  pooltool health --no-color          # Plain text for logs
 
 For automation integration, use --quiet --json for minimal, parseable output.
 EOF
@@ -65,15 +66,21 @@ EOF
 #-------------------------------------------------------------------------------
 # Parse command line arguments for health command
 #-------------------------------------------------------------------------------
-function health::parse_args {
+function parse_args {
     local position=""
     local check_all=false
+    
+    # Reset global flags
+    HEALTH_QUIET=false
+    HEALTH_VERBOSE=false
+    HEALTH_JSON=false
+    HEALTH_NO_COLOR=false
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help)
-                this::health::print_help
-                exit 0
+                this::print_help
+                return 255  # Special return code for help
                 ;;
             -q|--quiet)
                 HEALTH_QUIET=true
@@ -92,13 +99,14 @@ function health::parse_args {
                 shift
                 ;;
             --all)
+                # Support --all for backward compatibility, but it's now the default
                 check_all=true
                 shift
                 ;;
             [1-9]|[12][0-9]|2[0-4])
                 if [[ -n "$position" ]]; then
                     echo "Error: Multiple positions specified" >&2
-                    exit 1
+                    return 1
                 fi
                 position="$1"
                 shift
@@ -106,35 +114,36 @@ function health::parse_args {
             *)
                 echo "Error: Unknown argument '$1'" >&2
                 echo "Use 'pooltool health --help' for usage information." >&2
-                exit 1
+                return 1
                 ;;
         esac
     done
     
-    # Validate arguments
+    # Validate arguments - --all and position are mutually exclusive
     if [[ "$check_all" == true && -n "$position" ]]; then
         echo "Error: Cannot specify both --all and a position" >&2
-        exit 1
+        return 1
     fi
     
-    if [[ "$check_all" == false && -z "$position" ]]; then
-        echo "Error: Must specify either a position (1-24) or --all" >&2
-        echo "Use 'pooltool health --help' for usage information." >&2
-        exit 1
+    # Default behavior: if no position specified, check all drives
+    if [[ -z "$position" ]]; then
+        check_all=true
     fi
     
-    # Set global values for main function
+    # Set global target variable
     if [[ "$check_all" == true ]]; then
-        echo "all"
+        HEALTH_TARGET="all"
     else
-        echo "$position"
+        HEALTH_TARGET="$position"
     fi
+    
+    return 0
 }
 
 #-------------------------------------------------------------------------------
 # Format health status for display
 #-------------------------------------------------------------------------------
-function health::format_status {
+function format_status {
     local status="$1"
     local use_color="$2"
     
@@ -158,9 +167,10 @@ function health::format_status {
 #-------------------------------------------------------------------------------
 # Get health data for a single drive
 #-------------------------------------------------------------------------------
-function health::get_drive_health_data {
+function get_drive_health_data {
     local position="$1"
-    local unified_array=("${@:2}")
+    local main_controller="$2"
+    local unified_array=("${@:3}")
     
     local drive_found=false
     local health_data=""
@@ -184,17 +194,17 @@ function health::get_drive_health_data {
                 drive_found=true
                 
                 # Get health information
-                if [[ "$system_device" != "N/A" && "$controller" != "N/A" ]]; then
-                    health_data=$(pooltool::get_drive_health "$system_device" "$controller")
+                if [[ "$system_device" != "N/A" ]]; then
+                    health_data=$(pooltool::get_drive_health "$system_device" "$main_controller")
                     if [[ "$health_data" =~ ^([^:]+):([^:]+):([^:]+):([^:]+)$ ]]; then
-                        echo "found:$position:$system_device:$snapraid_name:$mount_path:$health_data"
+                        echo "found:$position:$system_device:$mount_name:$mount_path:$health_data"
                         return 0
                     else
                         echo "error:$position:$system_device:$snapraid_name:$mount_path:Unable to retrieve health data"
                         return 5
                     fi
                 else
-                    echo "unavailable:$position:N/A:$snapraid_name:$mount_path:Drive not accessible"
+                    echo "unavailable:$position:N/A:$mount_name:$mount_path:Drive not accessible"
                     return 2
                 fi
             fi
@@ -210,7 +220,7 @@ function health::get_drive_health_data {
 #-------------------------------------------------------------------------------
 # Output single drive health in JSON format
 #-------------------------------------------------------------------------------
-function health::output_json_single {
+function output_json_single {
     local result="$1"
     
     if [[ "$result" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):(.*)$ ]]; then
@@ -251,7 +261,7 @@ function health::output_json_single {
 #-------------------------------------------------------------------------------
 # Output single drive health in standard format
 #-------------------------------------------------------------------------------
-function health::output_standard_single {
+function output_standard_single {
     local result="$1"
     
     if [[ "$result" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):(.*)$ ]]; then
@@ -273,7 +283,7 @@ function health::output_standard_single {
             local power_hours="${BASH_REMATCH[3]}"
             local power_cycles="${BASH_REMATCH[4]}"
             
-            local status_display=$(this::health::format_status "$health_status" true)
+            local status_display=$(this::format_status "$health_status" true)
             
             if [[ "$HEALTH_QUIET" == true ]]; then
                 echo "Position $position: $health_status"
@@ -325,7 +335,19 @@ function health::output_standard_single {
 # Main health command function
 #-------------------------------------------------------------------------------
 function health {
-    local target=$(this::health::parse_args "$@")
+    # Parse arguments
+    if ! this::parse_args "$@"; then
+        local parse_exit_code=$?
+        if [[ $parse_exit_code -eq 255 ]]; then
+            # Help was shown, exit successfully
+            exit 0
+        else
+            # Error in arguments
+            exit 1
+        fi
+    fi
+    
+    local target="$HEALTH_TARGET"
     local controller="${POOLTOOL_CONTROLLER:-1}"
     local exit_code=0
     local critical_found=false
@@ -345,41 +367,70 @@ function health {
     mapfile -t unified_array <<< "$unified_data"
     
     if [[ "$target" == "all" ]]; then
-        # Check all drives
+        # Check all drives efficiently using bulk health collection
+        local health_results
+        if ! health_results=$(pooltool::get_all_health_info_efficient "$controller" "${unified_array[@]}" 2>/dev/null); then
+            if [[ "$HEALTH_JSON" == true ]]; then
+                echo '{"error": "Unable to retrieve health data", "accessible": false}'
+            else
+                echo "Error: Unable to retrieve health data for drives" >&2
+            fi
+            exit 5
+        fi
+        
         local results=()
         local positions=()
         
-        # Collect all drive positions
-        for unified_entry in "${unified_array[@]}"; do
-            if [[ "$unified_entry" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*):([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+        # Parse the bulk health results and convert to our format
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*):([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]+):([^:]+):([^:]+):([^:]+)$ ]]; then
+                local mount_name="${BASH_REMATCH[1]}"
+                local snapraid_name="${BASH_REMATCH[2]}"
                 local rec_connector="${BASH_REMATCH[3]}"
                 local rec_device="${BASH_REMATCH[4]}"
+                local mount_path="${BASH_REMATCH[5]}"
+                local system_device="${BASH_REMATCH[6]}"
+                local health_status="${BASH_REMATCH[14]}"
+                local temperature="${BASH_REMATCH[15]}"
+                local power_hours="${BASH_REMATCH[16]}"
+                local reallocated_sectors="${BASH_REMATCH[17]}"
+                
+                # Calculate position using the same logic as select command
                 local calc_position=$(( rec_connector * 4 + (4 - rec_device) ))
                 positions+=("$calc_position")
+                
+                # Format health data like get_drive_health_data output
+                local health_data="$health_status:$temperature:$power_hours:$reallocated_sectors"
+                local result="found:$calc_position:$system_device:$mount_name:$mount_path:$health_data"
+                results+=("$result")
+                
+                # Check for critical status
+                if [[ "$health_status" == "critical" ]]; then
+                    critical_found=true
+                fi
+                
+                # Track exit codes - warning and critical should return appropriate codes
+                case "$health_status" in
+                    "critical") exit_code=3 ;;
+                    "warning") [[ $exit_code -lt 1 ]] && exit_code=1 ;;
+                esac
             fi
-        done
+        done <<< "$health_results"
         
-        # Sort positions
-        IFS=$'\n' positions=($(sort -n <<< "${positions[*]}"))
+        # Sort results by position for consistent output
+        local sorted_results=()
+        IFS=$'\n' sorted_positions=($(printf '%s\n' "${positions[@]}" | sort -n))
         unset IFS
         
-        # Check each drive
-        for pos in "${positions[@]}"; do
-            local result
-            result=$(this::health::get_drive_health_data "$pos" "${unified_array[@]}")
-            local drive_exit_code=$?
-            results+=("$result")
-            
-            # Track the worst exit code
-            if [[ $drive_exit_code -gt $exit_code ]]; then
-                exit_code=$drive_exit_code
-            fi
-            
-            # Check for critical status
-            if [[ "$result" =~ :critical: ]]; then
-                critical_found=true
-            fi
+        for pos in "${sorted_positions[@]}"; do
+            for result in "${results[@]}"; do
+                if [[ "$result" =~ ^found:$pos: ]]; then
+                    sorted_results+=("$result")
+                    break
+                fi
+            done
         done
+        results=("${sorted_results[@]}")
         
         # Output results
         if [[ "$HEALTH_JSON" == true ]]; then
@@ -387,7 +438,7 @@ function health {
             echo "  \"drives\": ["
             for i in "${!results[@]}"; do
                 echo -n "    "
-                this::health::output_json_single "${results[$i]}"
+                this::output_json_single "${results[$i]}"
                 if [[ $i -lt $((${#results[@]} - 1)) ]]; then
                     echo ","
                 else
@@ -408,7 +459,7 @@ function health {
             fi
             
             for result in "${results[@]}"; do
-                this::health::output_standard_single "$result"
+                this::output_standard_single "$result"
             done
             
             if [[ "$HEALTH_QUIET" == false ]]; then
@@ -422,13 +473,13 @@ function health {
     else
         # Check single drive
         local result
-        result=$(this::health::get_drive_health_data "$target" "${unified_array[@]}")
+        result=$(this::get_drive_health_data "$target" "$controller" "${unified_array[@]}")
         exit_code=$?
         
         if [[ "$HEALTH_JSON" == true ]]; then
-            this::health::output_json_single "$result"
+            this::output_json_single "$result"
         else
-            this::health::output_standard_single "$result"
+            this::output_standard_single "$result"
         fi
         
         # Check for critical status

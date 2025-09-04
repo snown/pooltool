@@ -1,0 +1,156 @@
+#!/bin/bash
+
+# Pooltool Replace Drive Command - Interface for drive replacement wizard
+# Part of Phase 3.2: Advanced Workflows
+# Created: September 4, 2025
+
+NAMESPACE="global"
+
+#
+# Main replace-drive command entry point
+#
+cmd_replace() {
+    # Load required modules
+    bootstrap_load_module pooltool/workflows/replace_drive
+    
+    # Parse command line arguments
+    local drive_position=""
+    local show_help=false
+    local resume_workflow=""
+    local list_workflows=false
+    
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -h|--help)
+                show_help=true
+                shift
+                ;;
+            --resume)
+                resume_workflow="$2"
+                shift 2
+                ;;
+            --list)
+                list_workflows=true
+                shift
+                ;;
+            [1-9]|1[0-9]|2[0-4])
+                drive_position="$1"
+                shift
+                ;;
+            *)
+                echo "Error: Unknown argument '$1'" >&2
+                show_help=true
+                shift
+                ;;
+        esac
+    done
+    
+    # Show help if requested or invalid arguments
+    if [[ "$show_help" == true ]]; then
+        show_replace_help
+        return 0
+    fi
+    
+    # List workflows if requested
+    if [[ "$list_workflows" == true ]]; then
+        echo "📋 Drive Replacement Workflows:"
+        echo "════════════════════════════════════════════════════════════════════"
+        workflow_list
+        return 0
+    fi
+    
+    # Resume workflow if requested
+    if [[ -n "$resume_workflow" ]]; then
+        echo "🔄 Resume functionality not yet implemented"
+        echo "💡 This feature will be added in a future update"
+        return 1
+    fi
+    
+    # Start drive replacement wizard
+    replace_drive_wizard "$drive_position"
+    return $?
+}
+
+#
+# Show help for replace-drive command
+#
+show_replace_help() {
+    cat << 'EOF'
+🔄 POOLTOOL DRIVE REPLACEMENT WIZARD
+
+USAGE:
+    pooltool replace-drive [POSITION] [OPTIONS]
+
+DESCRIPTION:
+    Guided workflow for safely replacing drives in your storage array.
+    Includes comprehensive safety checks, step-by-step guidance, and
+    validation to prevent data loss during drive replacement operations.
+
+ARGUMENTS:
+    POSITION        Drive position to replace (1-24)
+                   If not specified, you'll be prompted to select
+
+OPTIONS:
+    -h, --help      Show this help message
+    --list          List all current replacement workflows
+    --resume ID     Resume a paused workflow (not yet implemented)
+
+WORKFLOW STEPS:
+    1. 🔍 Drive Assessment     - Analyze target drive and confirm selection
+    2. 🛡️  Safety Checks        - Run comprehensive pre-flight validation
+    3. 🛠️  Preparation          - Prepare system and identify physical drive
+    4. 🔧 Physical Replacement - Guide through physical drive swap
+    5. 📦 Data Migration       - Handle data rebuild or migration
+    6. ✅ Final Validation     - Verify successful replacement
+
+SAFETY FEATURES:
+    • Multiple confirmation points with risk assessment
+    • Pre-flight checks for system health and array status
+    • LED blinking for physical drive identification
+    • Comprehensive audit trail and logging
+    • Rollback capability at most steps
+    • Post-replacement validation and testing
+
+EXAMPLES:
+    pooltool replace-drive              # Interactive mode - select drive
+    pooltool replace-drive 12           # Replace drive at position 12
+    pooltool replace-drive --list       # Show current workflows
+    pooltool replace-drive --help       # Show this help
+
+WORKFLOW MANAGEMENT:
+    • Each replacement gets a unique workflow ID
+    • Complete audit trail stored in /var/log/pooltool/
+    • Workflow state preserved in /tmp/pooltool-workflows/
+    • Resume capability for interrupted operations (future)
+
+REQUIREMENTS:
+    • Root or sudo access for drive operations
+    • Physical access to the server/drive bays
+    • Replacement drive ready for installation
+    • Recent backups recommended
+    • SnapRAID array should be in sync (if applicable)
+
+RISK ASSESSMENT:
+    🟡 MEDIUM RISK - Drive replacement involves:
+    • Physical hardware manipulation
+    • Temporary array vulnerability
+    • Potential for data loss if not done properly
+    • System downtime during physical swap
+
+SAFETY RECOMMENDATIONS:
+    • Ensure recent backups before starting
+    • Verify no critical operations are running
+    • Have replacement drive tested and ready
+    • Plan for maintenance window if needed
+    • Review SnapRAID sync status
+
+For more information about drive management and safety procedures,
+see the Pooltool documentation or run 'pooltool help workflows'.
+
+EOF
+}
+
+# Execute command if called directly (not sourced)
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    cmd_replace "$@"
+fi
