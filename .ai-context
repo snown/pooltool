@@ -93,6 +93,29 @@ pooltool::get_all_health_info_efficient "$controller" "${unified_array[@]}"  # F
 - **Performance**: 20x optimization through bulk SMART data collection
 - **UI**: Interactive grid-based drive visualization
 - **Automation**: CLI modes with JSON output and proper exit codes
+- **Health Monitoring**: Comprehensive drive health assessment with upgrade evaluation
+
+## KEY COMMANDS
+
+### Health and Evaluation
+```bash
+./pooltool.sh health                  # Check all drive health
+./pooltool.sh health --evaluate       # Analyze drives for upgrade recommendations  
+./pooltool.sh health --evaluate --json # Machine-readable evaluation output
+```
+
+The `--evaluate` feature provides comprehensive drive analysis including:
+- Age assessment (power-on hours)
+- Capacity analysis (drive size vs. utilization)
+- Health status (SMART data)
+- Temperature monitoring
+- Risk scoring and upgrade prioritization
+
+### Workflow Management
+```bash
+./pooltool.sh workflow list           # Show available workflows
+./pooltool.sh workflow status         # Check workflow progress
+```
 
 ## GETTING STARTED
 

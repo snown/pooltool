@@ -198,6 +198,55 @@ declare -F | grep "pooltool::commands::" | head -5
 # 3. Performance test for health operations
 time ./pooltool.sh health --quiet
 
+# 4. Test new evaluation feature
+./pooltool.sh health --evaluate --quiet
+```
+
+## Health Command and Drive Evaluation
+
+### Drive Evaluation Feature
+
+The health command includes an advanced `--evaluate` mode that provides comprehensive drive analysis:
+
+```bash
+# Basic health check
+./pooltool.sh health
+
+# Drive evaluation with upgrade recommendations  
+./pooltool.sh health --evaluate
+
+# Automation-friendly JSON output
+./pooltool.sh health --evaluate --json --quiet
+```
+
+### Evaluation Criteria
+
+The evaluation system analyzes multiple factors for upgrade prioritization:
+
+**Age Analysis:**
+- Power-on hours converted to approximate years
+- Risk scoring: 70k+ hours (40 points), 50k+ hours (25 points), 30k+ hours (10 points)
+
+**Capacity Assessment:**
+- Small capacity drives (<4TB) get higher risk scores for upgrade value
+- Size scoring: <4TB (+25 points), <8TB (+15 points), <12TB (+5 points)
+
+**Usage Analysis:**
+- High utilization increases upgrade priority
+- Usage scoring: >95% (+20 points), >90% (+15 points), >80% (+10 points)
+
+**Health Status:**
+- Critical SMART status (+50 points, urgent replacement)
+- Warning status (+30 points)  
+- Temperature monitoring (+20 points for >50°C, +10 points for >45°C)
+
+### Implementation Notes
+
+- Uses `health::get_drive_capacity_info()` to extract capacity and usage from mounted filesystems
+- Converts capacities to bytes for comparison using `health::capacity_to_bytes()`
+- Sorts results by risk score (highest first) for prioritized recommendations
+- Supports both human-readable and JSON output formats
+
 # 4. Test specific new functionality
 ./pooltool.sh your-new-command --help
 ```

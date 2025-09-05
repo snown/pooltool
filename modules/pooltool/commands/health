@@ -23,12 +23,13 @@ declare -g HEALTH_QUIET=false
 declare -g HEALTH_VERBOSE=false
 declare -g HEALTH_JSON=false
 declare -g HEALTH_NO_COLOR=false
+declare -g HEALTH_EVALUATE=false
 declare -g HEALTH_TARGET=""
 
 #-------------------------------------------------------------------------------
 # Print health command help
 #-------------------------------------------------------------------------------
-function print_help {
+function health::print_help {
     cat << 'EOF'
 USAGE: pooltool health [OPTIONS] [POSITION]
 
@@ -43,6 +44,7 @@ OPTIONS:
   -v, --verbose     Detailed output for debugging and logging  
   -j, --json        Machine-readable JSON output for integration
   --no-color        Plain text output for log files and scripts
+  --evaluate        Analyze all drives and recommend upgrade candidates
   -h, --help        Show this help message
 
 EXIT CODES:
@@ -58,6 +60,7 @@ EXAMPLES:
   pooltool health --quiet              # Check all drives, minimal output
   pooltool health 12 --json           # JSON output for position 12
   pooltool health --no-color          # Plain text for logs
+  pooltool health --evaluate          # Analyze drives for upgrade candidates
 
 For automation integration, use --quiet --json for minimal, parseable output.
 EOF
@@ -75,11 +78,12 @@ function parse_args {
     HEALTH_VERBOSE=false
     HEALTH_JSON=false
     HEALTH_NO_COLOR=false
+    HEALTH_EVALUATE=false
     
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help)
-                this::print_help
+                this::health::print_help
                 return 255  # Special return code for help
                 ;;
             -q|--quiet)
@@ -96,6 +100,10 @@ function parse_args {
                 ;;
             --no-color)
                 HEALTH_NO_COLOR=true
+                shift
+                ;;
+            --evaluate)
+                HEALTH_EVALUATE=true
                 shift
                 ;;
             --all)
@@ -141,6 +149,95 @@ function parse_args {
 }
 
 #-------------------------------------------------------------------------------
+# Get drive capacity and usage information
+#-------------------------------------------------------------------------------
+function health::get_drive_capacity_info {
+    local device="$1"
+    local mount_name="$2"
+    
+    # Try to get capacity info from df output for mounted drives
+    local df_info=""
+    if [[ "$device" != "NONE" && -n "$device" ]]; then
+        # Look for mounted partition (typically device + 1, e.g., /dev/sda1)
+        df_info=$(df -h "${device}1" 2>/dev/null | tail -n 1)
+    fi
+    
+    # If no df info, try to find by mount name
+    if [[ -z "$df_info" && -n "$mount_name" ]]; then
+        df_info=$(df -h | grep "/mnt/$mount_name" 2>/dev/null)
+    fi
+    
+    local capacity=""
+    local used=""
+    local available=""
+    local usage_percent=""
+    
+    if [[ -n "$df_info" ]]; then
+        # Parse df output: Filesystem Size Used Avail Use% Mounted
+        if [[ "$df_info" =~ ^[^[:space:]]+[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:]]+)[[:space:]]+([0-9]+)% ]]; then
+            capacity="${BASH_REMATCH[1]}"
+            used="${BASH_REMATCH[2]}"
+            available="${BASH_REMATCH[3]}"
+            usage_percent="${BASH_REMATCH[4]}"
+        fi
+    fi
+    
+    # If still no info, try lsblk for device capacity
+    if [[ -z "$capacity" && "$device" != "NONE" && -n "$device" ]]; then
+        local lsblk_info
+        lsblk_info=$(lsblk -b -o SIZE -n "$device" 2>/dev/null | head -n 1)
+        if [[ -n "$lsblk_info" ]]; then
+            # Convert bytes to human readable
+            capacity=$(numfmt --to=iec-i --suffix=B "$lsblk_info" 2>/dev/null | sed 's/B$//')
+            usage_percent="0"  # Unknown usage for unmounted drives
+        fi
+    fi
+    
+    # Default values if no information found
+    [[ -z "$capacity" ]] && capacity="Unknown"
+    [[ -z "$used" ]] && used="Unknown"
+    [[ -z "$available" ]] && available="Unknown"  
+    [[ -z "$usage_percent" ]] && usage_percent="0"
+    
+    echo "$capacity:$used:$available:$usage_percent"
+}
+
+#-------------------------------------------------------------------------------
+# Convert capacity to numeric bytes for comparison
+#-------------------------------------------------------------------------------
+function health::capacity_to_bytes {
+    local capacity="$1"
+    
+    # Remove trailing letters and convert to lowercase
+    local size="${capacity%[A-Za-z]*}"
+    local unit="${capacity##*[0-9.]}"
+    unit=$(echo "$unit" | tr '[:upper:]' '[:lower:]')
+    
+    # Handle decimal numbers - round to integer
+    if [[ ! "$size" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        echo "0"
+        return
+    fi
+    
+    # Convert to integer bytes
+    local bytes
+    case "$unit" in
+        k|kb) bytes=$(echo "$size * 1024" | bc 2>/dev/null | cut -d. -f1) ;;
+        m|mb) bytes=$(echo "$size * 1024 * 1024" | bc 2>/dev/null | cut -d. -f1) ;;
+        g|gb) bytes=$(echo "$size * 1024 * 1024 * 1024" | bc 2>/dev/null | cut -d. -f1) ;;
+        t|tb) bytes=$(echo "$size * 1024 * 1024 * 1024 * 1024" | bc 2>/dev/null | cut -d. -f1) ;;
+        *) bytes="$size" ;;  # Assume bytes if no unit
+    esac
+    
+    # Ensure we have a valid integer
+    if [[ "$bytes" =~ ^[0-9]+$ ]]; then
+        echo "$bytes"
+    else
+        echo "0"
+    fi
+}
+
+#-------------------------------------------------------------------------------
 # Format health status for display
 #-------------------------------------------------------------------------------
 function format_status {
@@ -178,25 +275,14 @@ function get_drive_health_data {
     # Search for drive at specified position
     for unified_entry in "${unified_array[@]}"; do
         if [[ "$unified_entry" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*):([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
-            local mount_name="${BASH_REMATCH[1]}"        # DRU03, NEW-14T, etc.
-            local position_field="${BASH_REMATCH[2]}"    # Position number
-            local rec_connector="${BASH_REMATCH[3]}"     # Connector
-            local rec_device="${BASH_REMATCH[4]}"        # Device slot
-            local snapraid_role="${BASH_REMATCH[5]}"     # data3, parity, NONE
-            local system_device="${BASH_REMATCH[6]}"     # /dev/sdd or NONE
-            local wwn="${BASH_REMATCH[7]}"               # WWN
-            local serial="${BASH_REMATCH[8]}"            # Serial number
-            local channel="${BASH_REMATCH[9]}"           # Channel
-            local device_num="${BASH_REMATCH[10]}"       # Device number  
-            local model="${BASH_REMATCH[11]}"            # Drive model
-            local size="${BASH_REMATCH[12]}"             # Drive size
-            local type="${BASH_REMATCH[13]}"             # Type/status
-            
-            # Mount path for SnapRAID drives
-            local mount_path=""
-            if [[ "$snapraid_role" != "NONE" ]]; then
-                mount_path="/mnt/$mount_name"
-            fi
+            local mount_name="${BASH_REMATCH[1]}"
+            local snapraid_name="${BASH_REMATCH[2]}"
+            local rec_connector="${BASH_REMATCH[3]}"
+            local rec_device="${BASH_REMATCH[4]}"
+            local mount_path="${BASH_REMATCH[5]}"
+            local system_device="${BASH_REMATCH[6]}"
+            local controller="${BASH_REMATCH[7]}"
+            local arcconf_position="${BASH_REMATCH[8]}"
             
             # Calculate position using the same logic as select command
             local calc_position=$(( rec_connector * 4 + (4 - rec_device) ))
@@ -205,30 +291,17 @@ function get_drive_health_data {
                 drive_found=true
                 
                 # Get health information
-                if [[ "$system_device" != "NONE" && "$system_device" != "N/A" ]]; then
+                if [[ "$system_device" != "N/A" ]]; then
                     health_data=$(pooltool::get_drive_health "$system_device" "$main_controller")
                     if [[ "$health_data" =~ ^([^:]+):([^:]+):([^:]+):([^:]+)$ ]]; then
-                        # Format: found:position:device:name_or_role:mount_or_type:health_data
-                        if [[ "$snapraid_role" == "NONE" ]]; then
-                            echo "found:$position:$system_device:$mount_name:unallocated:$health_data"
-                        else
-                            echo "found:$position:$system_device:$snapraid_role:$mount_path:$health_data"
-                        fi
+                        echo "found:$position:$system_device:$mount_name:$mount_path:$health_data"
                         return 0
                     else
-                        if [[ "$snapraid_role" == "NONE" ]]; then
-                            echo "error:$position:$system_device:$mount_name:unallocated:Unable to retrieve health data"
-                        else
-                            echo "error:$position:$system_device:$snapraid_role:$mount_path:Unable to retrieve health data"
-                        fi
+                        echo "error:$position:$system_device:$snapraid_name:$mount_path:Unable to retrieve health data"
                         return 5
                     fi
                 else
-                    if [[ "$snapraid_role" == "NONE" ]]; then
-                        echo "unavailable:$position:NONE:$mount_name:unallocated:Drive not accessible"
-                    else
-                        echo "unavailable:$position:NONE:$snapraid_role:$mount_path:Drive not accessible"
-                    fi
+                    echo "unavailable:$position:N/A:$mount_name:$mount_path:Drive not accessible"
                     return 2
                 fi
             fi
@@ -258,16 +331,8 @@ function output_json_single {
         echo "{"
         echo "  \"position\": $position,"
         echo "  \"device\": \"$device\","
-        
-        if [[ "$mount" == "unallocated" ]]; then
-            echo "  \"drive_name\": \"$snapraid\","
-            echo "  \"status_type\": \"unallocated\","
-            echo "  \"in_snapraid\": false,"
-        else
-            echo "  \"snapraid_role\": \"$snapraid\","
-            echo "  \"mount_path\": \"$mount\","
-            echo "  \"in_snapraid\": true,"
-        fi
+        echo "  \"snapraid_name\": \"$snapraid\","
+        echo "  \"mount_path\": \"$mount\","
         
         if [[ "$status" == "found" && "$health_info" =~ ^([^:]+):([^:]+):([^:]+):([^:]+)$ ]]; then
             local health_status="${BASH_REMATCH[1]}"
@@ -322,16 +387,8 @@ function output_standard_single {
             else
                 printf "  %-20s %s\n" "Position:" "$position"
                 printf "  %-20s %s\n" "Device:" "$device"
-                
-                # Show appropriate label based on whether drive is in SnapRAID array
-                if [[ "$mount" == "unallocated" ]]; then
-                    printf "  %-20s %s\n" "Drive Name:" "$snapraid"
-                    printf "  %-20s %s\n" "Status:" "Unallocated (not in SnapRAID)"
-                else
-                    printf "  %-20s %s\n" "SnapRAID Role:" "$snapraid"
-                    printf "  %-20s %s\n" "Mount Path:" "$mount"
-                fi
-                
+                printf "  %-20s %s\n" "SnapRAID Name:" "$snapraid"
+                printf "  %-20s %s\n" "Mount Path:" "$mount"
                 printf "  %-20s %s\n" "Health Status:" "$status_display"
                 printf "  %-20s %s°C\n" "Temperature:" "$temperature"
                 printf "  %-20s %s hours\n" "Power-On Time:" "$power_hours"
@@ -372,6 +429,343 @@ function output_standard_single {
 }
 
 #-------------------------------------------------------------------------------
+# Evaluate all drives and recommend upgrade candidates
+#-------------------------------------------------------------------------------
+function health::evaluate_drives {
+    local controller="$1"
+    
+    if [[ "$HEALTH_QUIET" == false ]]; then
+        echo "🔍 DRIVE EVALUATION ANALYSIS"
+        echo "═══════════════════════════"
+        echo
+    fi
+    
+    # Get unified device data
+    local unified_data
+    unified_data=$(pooltool::create_unified_mapping "$controller" 2>/dev/null)
+    if [[ -z "$unified_data" ]]; then
+        echo "Error: Unable to retrieve system data" >&2
+        return 5
+    fi
+    
+    mapfile -t unified_array <<< "$unified_data"
+    
+    # Get health data for all drives
+    local health_results
+    if ! health_results=$(pooltool::get_all_health_info_efficient "$controller" "${unified_array[@]}" 2>/dev/null); then
+        echo "Error: Unable to retrieve health data for drives" >&2
+        return 5
+    fi
+    
+    # Analyze each drive and create evaluation results
+    local evaluation_results=()
+    local critical_count=0
+    local warning_count=0
+    local upgrade_candidates=()
+    
+    while IFS= read -r line; do
+        if [[ -n "$line" && "$line" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*):([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+            local mount_name="${BASH_REMATCH[1]}"
+            local snapraid_name="${BASH_REMATCH[2]}"
+            local rec_connector="${BASH_REMATCH[3]}"
+            local rec_device="${BASH_REMATCH[4]}"
+            local mount_path="${BASH_REMATCH[5]}"
+            local system_device="${BASH_REMATCH[6]}"
+            local controller="${BASH_REMATCH[7]}"
+            local arcconf_position="${BASH_REMATCH[8]}"
+            local health_status="${BASH_REMATCH[14]}"
+            local temperature="${BASH_REMATCH[15]}"
+            local power_hours="${BASH_REMATCH[16]}"
+            local reallocated_sectors="${BASH_REMATCH[17]}"
+            
+            # Calculate position using the same logic as select command
+            local calc_position=$(( rec_connector * 4 + (4 - rec_device) ))
+            
+            # Calculate risk score (0-100, higher is worse)
+            local risk_score=0
+            local risk_factors=()
+            local recommendation=""
+            
+            # Age analysis (power on hours)
+            if [[ "$power_hours" =~ ^[0-9]+$ ]]; then
+                local age_years=$((power_hours / 8760))  # Approximate years based on 24/7 operation
+                if [[ $power_hours -gt 70000 ]]; then
+                    risk_score=$((risk_score + 40))
+                    risk_factors+=("Very high age: ${age_years}+ years")
+                elif [[ $power_hours -gt 50000 ]]; then
+                    risk_score=$((risk_score + 25))
+                    risk_factors+=("High age: ${age_years}+ years")
+                elif [[ $power_hours -gt 30000 ]]; then
+                    risk_score=$((risk_score + 10))
+                    risk_factors+=("Moderate age: ${age_years}+ years")
+                fi
+            fi
+            
+            # Health status analysis
+            case "$health_status" in
+                "critical")
+                    risk_score=$((risk_score + 50))
+                    risk_factors+=("Critical SMART status")
+                    critical_count=$((critical_count + 1))
+                    recommendation="URGENT: Replace immediately"
+                    ;;
+                "warning")
+                    risk_score=$((risk_score + 30))
+                    risk_factors+=("Warning SMART status")
+                    warning_count=$((warning_count + 1))
+                    ;;
+                "good")
+                    # No penalty for good health
+                    ;;
+            esac
+            
+            # Temperature analysis  
+            if [[ "$temperature" =~ ^[0-9]+$ ]]; then
+                if [[ $temperature -gt 50 ]]; then
+                    risk_score=$((risk_score + 20))
+                    risk_factors+=("High temperature: ${temperature}°C")
+                elif [[ $temperature -gt 45 ]]; then
+                    risk_score=$((risk_score + 10))
+                    risk_factors+=("Elevated temperature: ${temperature}°C")
+                fi
+            fi
+            
+            # Get capacity and usage information
+            local capacity_info
+            capacity_info=$(this::health::get_drive_capacity_info "$system_device" "$mount_name")
+            local capacity used available usage_percent
+            IFS=':' read -r capacity used available usage_percent <<< "$capacity_info"
+            
+            # Capacity and usage analysis
+            local capacity_bytes
+            capacity_bytes=$(this::health::capacity_to_bytes "$capacity")
+            
+            # Size-based scoring (smaller drives get higher risk for upgrade value)
+            if [[ "$capacity_bytes" != "0" && "$capacity" != "Unknown" ]]; then
+                local tb_size=$((capacity_bytes / (1024*1024*1024*1024)))
+                if [[ $tb_size -lt 4 ]]; then
+                    risk_score=$((risk_score + 25))
+                    risk_factors+=("Small capacity: $capacity")
+                elif [[ $tb_size -lt 8 ]]; then
+                    risk_score=$((risk_score + 15))
+                    risk_factors+=("Limited capacity: $capacity")
+                elif [[ $tb_size -lt 12 ]]; then
+                    risk_score=$((risk_score + 5))
+                    risk_factors+=("Moderate capacity: $capacity")
+                fi
+            fi
+            
+            # Usage-based scoring (high utilization increases upgrade priority)
+            if [[ "$usage_percent" =~ ^[0-9]+$ ]]; then
+                if [[ $usage_percent -gt 95 ]]; then
+                    risk_score=$((risk_score + 20))
+                    risk_factors+=("Very high usage: ${usage_percent}%")
+                elif [[ $usage_percent -gt 90 ]]; then
+                    risk_score=$((risk_score + 15))
+                    risk_factors+=("High usage: ${usage_percent}%")
+                elif [[ $usage_percent -gt 80 ]]; then
+                    risk_score=$((risk_score + 10))
+                    risk_factors+=("Elevated usage: ${usage_percent}%")
+                fi
+            fi
+            
+            # Reallocated sectors analysis
+            if [[ "$reallocated_sectors" =~ ^[0-9]+$ && $reallocated_sectors -gt 0 ]]; then
+                if [[ $reallocated_sectors -gt 10 ]]; then
+                    risk_score=$((risk_score + 30))
+                    risk_factors+=("High reallocated sectors: $reallocated_sectors")
+                elif [[ $reallocated_sectors -gt 0 ]]; then
+                    risk_score=$((risk_score + 15))
+                    risk_factors+=("Reallocated sectors: $reallocated_sectors")
+                fi
+            fi
+            
+            # Determine overall recommendation
+            if [[ -z "$recommendation" ]]; then
+                if [[ $risk_score -ge 60 ]]; then
+                    recommendation="High priority upgrade candidate"
+                    upgrade_candidates+=("$calc_position:$risk_score:$mount_name")
+                elif [[ $risk_score -ge 35 ]]; then
+                    recommendation="Consider for future upgrade"
+                    upgrade_candidates+=("$calc_position:$risk_score:$mount_name")
+                elif [[ $risk_score -ge 15 ]]; then
+                    recommendation="Monitor closely"
+                else
+                    recommendation="Good condition"
+                fi
+            fi
+            
+            # Store evaluation result (including capacity information)
+            local risk_factors_str=""
+            if [[ ${#risk_factors[@]} -gt 0 ]]; then
+                risk_factors_str=$(IFS='; '; echo "${risk_factors[*]}")
+            else
+                risk_factors_str="None identified"
+            fi
+            
+            evaluation_results+=("$calc_position:$mount_name:$system_device:$health_status:$temperature:$power_hours:$capacity:$used:$available:$usage_percent:$risk_score:$recommendation:$risk_factors_str")
+        fi
+    done <<< "$health_results"
+    
+    # Sort results by risk score (highest first)
+    local sorted_results=()
+    IFS=$'\n' sorted_results=($(printf '%s\n' "${evaluation_results[@]}" | sort -t: -k11 -nr))
+    unset IFS
+    
+    # Output results
+    if [[ "$HEALTH_JSON" == true ]]; then
+        echo "{"
+        echo "  \"evaluation_timestamp\": \"$(date -Iseconds)\","
+        echo "  \"summary\": {"
+        echo "    \"total_drives\": ${#evaluation_results[@]},"
+        echo "    \"critical_drives\": $critical_count,"
+        echo "    \"warning_drives\": $warning_count,"
+        echo "    \"upgrade_candidates\": ${#upgrade_candidates[@]}"
+        echo "  },"
+        echo "  \"drives\": ["
+        
+        for i in "${!sorted_results[@]}"; do
+            local result="${sorted_results[$i]}"
+            if [[ "$result" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):(.*)$ ]]; then
+                local position="${BASH_REMATCH[1]}"
+                local mount_name="${BASH_REMATCH[2]}"
+                local device="${BASH_REMATCH[3]}"
+                local health_status="${BASH_REMATCH[4]}"
+                local temperature="${BASH_REMATCH[5]}"
+                local power_hours="${BASH_REMATCH[6]}"
+                local capacity="${BASH_REMATCH[7]}"
+                local used="${BASH_REMATCH[8]}"
+                local available="${BASH_REMATCH[9]}"
+                local usage_percent="${BASH_REMATCH[10]}"
+                local risk_score="${BASH_REMATCH[11]}"
+                local recommendation="${BASH_REMATCH[12]}"
+                local risk_factors="${BASH_REMATCH[13]}"
+                
+                echo "    {"
+                echo "      \"position\": $position,"
+                echo "      \"mount_name\": \"$mount_name\","
+                echo "      \"device\": \"$device\","
+                echo "      \"health_status\": \"$health_status\","
+                echo "      \"temperature_celsius\": $temperature,"
+                echo "      \"power_on_hours\": $power_hours,"
+                echo "      \"capacity\": \"$capacity\","
+                echo "      \"used_space\": \"$used\","
+                echo "      \"available_space\": \"$available\","
+                echo "      \"usage_percent\": $usage_percent,"
+                echo "      \"risk_score\": $risk_score,"
+                echo "      \"recommendation\": \"$recommendation\","
+                echo "      \"risk_factors\": \"$risk_factors\""
+                if [[ $i -lt $((${#sorted_results[@]} - 1)) ]]; then
+                    echo "    },"
+                else
+                    echo "    }"
+                fi
+            fi
+        done
+        
+        echo "  ]"
+        echo "}"
+    else
+        # Standard output format
+        for result in "${sorted_results[@]}"; do
+            if [[ "$result" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):([^:]+):(.*)$ ]]; then
+                local position="${BASH_REMATCH[1]}"
+                local mount_name="${BASH_REMATCH[2]}"
+                local device="${BASH_REMATCH[3]}"
+                local health_status="${BASH_REMATCH[4]}"
+                local temperature="${BASH_REMATCH[5]}"
+                local power_hours="${BASH_REMATCH[6]}"
+                local capacity="${BASH_REMATCH[7]}"
+                local used="${BASH_REMATCH[8]}"
+                local available="${BASH_REMATCH[9]}"
+                local usage_percent="${BASH_REMATCH[10]}"
+                local risk_score="${BASH_REMATCH[11]}"
+                local recommendation="${BASH_REMATCH[12]}"
+                local risk_factors="${BASH_REMATCH[13]}"
+                
+                local age_years=$((power_hours / 8760))
+                
+                # Color coding for risk score
+                local risk_icon=""
+                local rec_color=""
+                if [[ "$HEALTH_NO_COLOR" == false ]]; then
+                    case "$health_status" in
+                        "critical") rec_color="❌" ;;
+                        "warning") rec_color="⚠️" ;;
+                        *) rec_color="✅" ;;
+                    esac
+                    
+                    if [[ $risk_score -ge 60 ]]; then
+                        risk_icon="🔴"
+                    elif [[ $risk_score -ge 35 ]]; then
+                        risk_icon="🟡"
+                    else
+                        risk_icon="🟢"
+                    fi
+                fi
+                
+                if [[ "$HEALTH_QUIET" == false ]]; then
+                    echo "${risk_icon} Position $position ($mount_name) - Risk Score: $risk_score/100"
+                    printf "  %-20s %s\n" "Device:" "$device"
+                    printf "  %-20s %s %s\n" "Health Status:" "$rec_color" "$health_status"
+                    printf "  %-20s %s°C\n" "Temperature:" "$temperature"
+                    printf "  %-20s %s hours (~%s years)\n" "Power-On Time:" "$power_hours" "$age_years"
+                    if [[ "$capacity" != "Unknown" ]]; then
+                        printf "  %-20s %s\n" "Capacity:" "$capacity"
+                        if [[ "$used" != "Unknown" && "$usage_percent" != "0" ]]; then
+                            printf "  %-20s %s used, %s free (%s%% used)\n" "Usage:" "$used" "$available" "$usage_percent"
+                        fi
+                    fi
+                    printf "  %-20s %s\n" "Recommendation:" "$recommendation"
+                    printf "  %-20s %s\n" "Risk Factors:" "$risk_factors"
+                    echo
+                else
+                    local capacity_info=""
+                    if [[ "$capacity" != "Unknown" ]]; then
+                        capacity_info=" - $capacity"
+                        if [[ "$usage_percent" != "0" ]]; then
+                            capacity_info="$capacity_info (${usage_percent}% used)"
+                        fi
+                    fi
+                    echo "Position $position: Risk $risk_score - $recommendation$capacity_info"
+                fi
+            fi
+        done
+        
+        if [[ "$HEALTH_QUIET" == false ]]; then
+            echo "📊 EVALUATION SUMMARY"
+            echo "══════════════════"
+            echo "Total drives analyzed: ${#evaluation_results[@]}"
+            echo "Critical drives: $critical_count"
+            echo "Warning drives: $warning_count"
+            echo "Upgrade candidates: ${#upgrade_candidates[@]}"
+            
+            if [[ ${#upgrade_candidates[@]} -gt 0 ]]; then
+                echo
+                echo "🎯 TOP UPGRADE CANDIDATES:"
+                for candidate in "${upgrade_candidates[@]}"; do
+                    if [[ "$candidate" =~ ^([^:]+):([^:]+):(.*)$ ]]; then
+                        local pos="${BASH_REMATCH[1]}"
+                        local score="${BASH_REMATCH[2]}"
+                        local name="${BASH_REMATCH[3]}"
+                        echo "  Position $pos ($name) - Risk Score: $score"
+                    fi
+                done
+            fi
+        fi
+    fi
+    
+    # Return exit code based on findings
+    if [[ $critical_count -gt 0 ]]; then
+        return 3
+    elif [[ $warning_count -gt 0 || ${#upgrade_candidates[@]} -gt 0 ]]; then
+        return 1
+    else
+        return 0
+    fi
+}
+
+#-------------------------------------------------------------------------------
 # Main health command function
 #-------------------------------------------------------------------------------
 function health {
@@ -385,6 +779,12 @@ function health {
             # Error in arguments
             exit 1
         fi
+    fi
+    
+    # If evaluation mode is requested, run drive evaluation and exit
+    if [[ "$HEALTH_EVALUATE" == true ]]; then
+        this::health::evaluate_drives "$controller"
+        exit $?
     fi
     
     local target="$HEALTH_TARGET"

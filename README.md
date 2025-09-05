@@ -36,11 +36,33 @@ To use `pooltool`, run the main script:
 - `mv` — Move files or directories into the RAID pool (uses `cp` then removes the source).
 - `disk` — Manage disks, including adding new disks and labeling partitions.
 - `devices` — Query SnapRAID devices for names, volumes, partitions, and mountpoints.
+- `health` — Monitor drive health status with automation support and upgrade evaluation.
+- `workflow` — Manage complex drive replacement workflows with progress tracking.
 
 Use `-h` or `--help` with any command for usage information:
 ```bash
 ./pooltool.sh <command> -h
 ```
+
+### Drive Health and Evaluation
+Monitor drive health and get upgrade recommendations:
+```bash
+# Check all drives
+./pooltool.sh health
+
+# Evaluate drives and recommend upgrade candidates
+./pooltool.sh health --evaluate
+
+# Get JSON output for automation
+./pooltool.sh health --evaluate --json
+```
+
+The evaluation feature analyzes:
+- **Drive age** (power-on hours)
+- **Health status** (SMART data)
+- **Temperature** monitoring
+- **Capacity** and space utilization
+- **Risk assessment** with upgrade priorities
 
 ## Functionality
 - **Framework**: Built on [Bash with Nails](https://github.com/mindaugasbarysas/bashwithnails) providing module loading and namespacing
