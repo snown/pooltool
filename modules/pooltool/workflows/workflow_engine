@@ -20,6 +20,10 @@ declare -gr WORKFLOW_STEP_COMPLETE=2
 declare -gr WORKFLOW_STEP_FAILED=3
 declare -gr WORKFLOW_STEP_SKIPPED=4
 
+# Sudo session management
+declare -g WORKFLOW_SUDO_INITIALIZED=false
+declare -g WORKFLOW_SUDO_TIMESTAMP=""
+
 #
 # Initialize workflow system
 #
@@ -76,15 +80,25 @@ workflow_engine_init() {
 # Start a new workflow
 # $1: workflow_name (e.g., "drive_replacement")
 # $2: total_steps (number of steps in workflow)
+# $3: optional: require_sudo (true|false, default: true)
 # Returns: workflow_id
 #
 workflow_start() {
     local workflow_name="$1"
     local total_steps="$2"
+    local require_sudo="${3:-true}"
     
     if [[ -z "$workflow_name" || -z "$total_steps" ]]; then
         echo "Error: workflow_start requires workflow_name and total_steps" >&2
         return 1
+    fi
+    
+    # Initialize sudo session if required
+    if [[ "$require_sudo" == true ]]; then
+        if ! workflow_sudo_init; then
+            echo "Error: Failed to initialize sudo session for workflow" >&2
+            return 1
+        fi
     fi
     
     # Generate unique workflow ID
@@ -104,6 +118,7 @@ workflow_start() {
         echo "current_step=0"
         echo "status=running"
         echo "started=$(date -Iseconds)"
+        echo "require_sudo=$require_sudo"
     } > "$state_file"
     
     # Log workflow start
@@ -159,6 +174,26 @@ workflow_step() {
         workflow_log "$log_level" "  Message: $message"
     fi
     
+    # Show progress indicators for step status changes
+    case "$step_status" in
+        "running")
+            echo "🔄 Starting: $step_name (Step $step_number/$WORKFLOW_TOTAL_STEPS)" >&2
+            ;;
+        "complete")
+            echo "✅ Completed: $step_name (Step $step_number/$WORKFLOW_TOTAL_STEPS)" >&2
+            # Show progress bar after each completed step
+            local progress_percent=$((step_number * 100 / WORKFLOW_TOTAL_STEPS))
+            echo "   Progress: $progress_percent% [$(printf '%*s' $((step_number * 20 / WORKFLOW_TOTAL_STEPS)) '' | tr ' ' '▓')$(printf '%*s' $((20 - step_number * 20 / WORKFLOW_TOTAL_STEPS)) '' | tr ' ' '░')]" >&2
+            ;;
+        "failed")
+            echo "❌ Failed: $step_name (Step $step_number/$WORKFLOW_TOTAL_STEPS)" >&2
+            [[ -n "$message" ]] && echo "   Error: $message" >&2
+            ;;
+        "skipped")
+            echo "⏭️ Skipped: $step_name (Step $step_number/$WORKFLOW_TOTAL_STEPS)" >&2
+            ;;
+    esac
+    
     return 0
 }
 
@@ -200,11 +235,14 @@ workflow_complete() {
     WORKFLOW_CURRENT_STEP=""
     WORKFLOW_TOTAL_STEPS=0
     
+    # Clean up sudo session
+    workflow_sudo_cleanup
+    
     return 0
 }
 
 #
-# Display workflow progress
+# Display workflow progress with visual indicators
 #
 workflow_progress() {
     if [[ -z "$WORKFLOW_CURRENT_ID" ]]; then
@@ -223,6 +261,71 @@ workflow_progress() {
     printf "%*s" "$completed_steps" "" | tr ' ' '▓'
     printf "%*s" "$remaining_steps" "" | tr ' ' '░'
     printf "] %d%%\n" $((WORKFLOW_CURRENT_STEP * 100 / WORKFLOW_TOTAL_STEPS))
+    
+    return 0
+}
+
+#
+# Display enhanced workflow progress with step details
+#
+workflow_progress_detailed() {
+    if [[ -z "$WORKFLOW_CURRENT_ID" ]]; then
+        echo "No active workflow"
+        return 1
+    fi
+    
+    local state_file="$WORKFLOW_STATE_DIR/${WORKFLOW_CURRENT_ID}.state"
+    if [[ ! -f "$state_file" ]]; then
+        echo "Workflow state file not found"
+        return 1
+    fi
+    
+    # Source state file to get workflow info
+    local workflow_name workflow_id total_steps current_step status started
+    source "$state_file"
+    
+    echo "📊 WORKFLOW PROGRESS"
+    echo "═══════════════════════════════════════════════════════════════════"
+    printf "%-15s %s\n" "Workflow:" "$workflow_name"
+    printf "%-15s %s\n" "ID:" "$workflow_id"
+    printf "%-15s %s\n" "Status:" "$status"
+    printf "%-15s %d/%d steps\n" "Progress:" "$current_step" "$total_steps"
+    printf "%-15s %s\n" "Started:" "$started"
+    
+    echo ""
+    echo "Progress Bar:"
+    workflow_progress
+    
+    echo ""
+    echo "📋 Step Details:"
+    echo "─────────────────────────────────────────────────────────────────────"
+    
+    # Show step details from state file
+    for ((i=1; i<=total_steps; i++)); do
+        local step_name=$(grep "step_${i}_name=" "$state_file" | cut -d'=' -f2-)
+        local step_status=$(grep "step_${i}_status=" "$state_file" | cut -d'=' -f2-)
+        local step_timestamp=$(grep "step_${i}_timestamp=" "$state_file" | cut -d'=' -f2-)
+        
+        if [[ -n "$step_name" ]]; then
+            local status_icon="⏳"
+            case "$step_status" in
+                "complete") status_icon="✅" ;;
+                "running") status_icon="🔄" ;;
+                "failed") status_icon="❌" ;;
+                "skipped") status_icon="⏭️" ;;
+                *) status_icon="⏳" ;;
+            esac
+            
+            printf "%s Step %d: %s" "$status_icon" "$i" "$step_name"
+            if [[ -n "$step_timestamp" ]]; then
+                local time_short=$(echo "$step_timestamp" | cut -d'T' -f2 | cut -d'+' -f1)
+                printf " (%s)" "$time_short"
+            fi
+            echo ""
+        else
+            printf "⏳ Step %d: (pending)\n" "$i"
+        fi
+    done
     
     return 0
 }
@@ -342,3 +445,283 @@ workflow_cleanup() {
 
 # Initialize workflow engine when module is loaded
 workflow_engine_init
+
+#
+# Sudo session management functions
+#
+
+#
+# Initialize sudo session for workflow operations
+# Should be called at the start of any workflow requiring sudo
+#
+workflow_sudo_init() {
+    workflow_log "INFO" "Initializing sudo session for workflow operations"
+    
+    # Check if sudo is already available
+    if sudo -n true 2>/dev/null; then
+        workflow_log "INFO" "Sudo session already active"
+        WORKFLOW_SUDO_INITIALIZED=true
+        WORKFLOW_SUDO_TIMESTAMP=$(date +%s)
+        return 0
+    fi
+    
+    # Prompt for sudo password upfront
+    echo "🔐 Administrative privileges required for drive operations" >&2
+    echo "Please enter your password to initialize secure session..." >&2
+    
+    if sudo -v; then
+        WORKFLOW_SUDO_INITIALIZED=true
+        WORKFLOW_SUDO_TIMESTAMP=$(date +%s)
+        workflow_log "INFO" "Sudo session initialized successfully"
+        
+        # Set up automatic sudo refresh during long operations
+        workflow_sudo_refresh_background &
+        
+        return 0
+    else
+        workflow_log "ERROR" "Failed to initialize sudo session"
+        echo "❌ Failed to initialize administrative session" >&2
+        echo "   Drive operations require administrative privileges" >&2
+        return 1
+    fi
+}
+
+#
+# Refresh sudo session to prevent timeout during long workflows
+#
+workflow_sudo_refresh() {
+    if [[ "$WORKFLOW_SUDO_INITIALIZED" == true ]]; then
+        if sudo -v 2>/dev/null; then
+            WORKFLOW_SUDO_TIMESTAMP=$(date +%s)
+            workflow_log "DEBUG" "Sudo session refreshed"
+            return 0
+        else
+            workflow_log "WARN" "Sudo session refresh failed"
+            WORKFLOW_SUDO_INITIALIZED=false
+            return 1
+        fi
+    fi
+    return 1
+}
+
+#
+# Background sudo refresh to maintain session during long operations
+#
+workflow_sudo_refresh_background() {
+    # Run in background to refresh sudo every 4 minutes (sudo timeout is usually 5 minutes)
+    while [[ "$WORKFLOW_SUDO_INITIALIZED" == true ]]; do
+        sleep 240  # 4 minutes
+        if [[ "$WORKFLOW_SUDO_INITIALIZED" == true ]]; then
+            workflow_sudo_refresh
+        fi
+    done
+}
+
+#
+# Check if sudo session is valid
+#
+workflow_sudo_check() {
+    if [[ "$WORKFLOW_SUDO_INITIALIZED" != true ]]; then
+        workflow_log "ERROR" "Sudo session not initialized"
+        echo "❌ Administrative session not initialized" >&2
+        echo "   Call workflow_sudo_init first" >&2
+        return 1
+    fi
+    
+    # Check if session is still valid
+    if sudo -n true 2>/dev/null; then
+        return 0
+    else
+        workflow_log "WARN" "Sudo session has expired"
+        WORKFLOW_SUDO_INITIALIZED=false
+        echo "⚠️  Administrative session has expired" >&2
+        echo "   Please run workflow_sudo_init to refresh" >&2
+        return 1
+    fi
+}
+
+#
+# Execute command with sudo, with session validation
+#
+workflow_sudo_exec() {
+    local command="$@"
+    
+    if ! workflow_sudo_check; then
+        return 1
+    fi
+    
+    workflow_log "DEBUG" "Executing sudo command: $command"
+    sudo "$@"
+}
+
+#
+# Clean up sudo session
+#
+workflow_sudo_cleanup() {
+    if [[ "$WORKFLOW_SUDO_INITIALIZED" == true ]]; then
+        workflow_log "INFO" "Cleaning up sudo session"
+        WORKFLOW_SUDO_INITIALIZED=false
+        WORKFLOW_SUDO_TIMESTAMP=""
+        
+        # Kill background refresh process if running
+        pkill -f "workflow_sudo_refresh_background" 2>/dev/null || true
+    fi
+}
+
+#
+# Error handling and recovery functions
+#
+
+#
+# Handle workflow errors with recovery suggestions
+# $1: error_type (auth|permission|hardware|network|user|unknown)
+# $2: error_message
+# $3: optional recovery_suggestion
+#
+workflow_handle_error() {
+    local error_type="$1"
+    local error_message="$2"
+    local recovery_suggestion="$3"
+    
+    workflow_log "ERROR" "Workflow error ($error_type): $error_message"
+    
+    echo "❌ WORKFLOW ERROR" >&2
+    echo "═══════════════════════════════════════════════════════════════════" >&2
+    echo "Error Type: $error_type" >&2
+    echo "Message: $error_message" >&2
+    
+    # Provide specific recovery suggestions based on error type
+    case "$error_type" in
+        "auth")
+            echo "" >&2
+            echo "🔐 AUTHENTICATION ERROR" >&2
+            echo "This operation requires administrative privileges." >&2
+            echo "" >&2
+            echo "💡 Recovery Options:" >&2
+            echo "1. Run: sudo -v  (refresh sudo session)" >&2
+            echo "2. Check if your user has sudo privileges" >&2
+            echo "3. Contact system administrator if needed" >&2
+            ;;
+        "permission")
+            echo "" >&2
+            echo "🚫 PERMISSION ERROR" >&2
+            echo "Insufficient permissions to access required resources." >&2
+            echo "" >&2
+            echo "💡 Recovery Options:" >&2
+            echo "1. Check file/directory permissions" >&2
+            echo "2. Ensure sudo access is working: sudo -v" >&2
+            echo "3. Verify disk is not read-only: mount | grep ro" >&2
+            ;;
+        "hardware")
+            echo "" >&2
+            echo "🔧 HARDWARE ERROR" >&2
+            echo "Hardware component is not responding or accessible." >&2
+            echo "" >&2
+            echo "💡 Recovery Options:" >&2
+            echo "1. Check physical connections (SATA, power)" >&2
+            echo "2. Verify drive is properly seated in bay" >&2
+            echo "3. Try different SATA port if available" >&2
+            echo "4. Check system logs: dmesg | grep -i error" >&2
+            ;;
+        "network")
+            echo "" >&2
+            echo "🌐 NETWORK ERROR" >&2
+            echo "Network connectivity or remote resource issue." >&2
+            echo "" >&2
+            echo "💡 Recovery Options:" >&2
+            echo "1. Check network connectivity: ping 8.8.8.8" >&2
+            echo "2. Verify DNS resolution: nslookup domain.com" >&2
+            echo "3. Check firewall settings if applicable" >&2
+            ;;
+        "user")
+            echo "" >&2
+            echo "👤 USER INPUT ERROR" >&2
+            echo "Invalid input or user cancelled operation." >&2
+            echo "" >&2
+            echo "💡 Recovery Options:" >&2
+            echo "1. Review input requirements and try again" >&2
+            echo "2. Use --help flag for command documentation" >&2
+            echo "3. Check examples in help output" >&2
+            ;;
+        *)
+            echo "" >&2
+            echo "❓ UNKNOWN ERROR" >&2
+            echo "An unexpected error occurred." >&2
+            echo "" >&2
+            echo "💡 Recovery Options:" >&2
+            echo "1. Check log files for detailed information" >&2
+            echo "2. Try running the operation again" >&2
+            echo "3. Contact support with error details" >&2
+            ;;
+    esac
+    
+    # Add custom recovery suggestion if provided
+    if [[ -n "$recovery_suggestion" ]]; then
+        echo "" >&2
+        echo "🎯 Specific Recovery Suggestion:" >&2
+        echo "$recovery_suggestion" >&2
+    fi
+    
+    echo "" >&2
+    echo "📋 Current Workflow Status:" >&2
+    if [[ -n "$WORKFLOW_CURRENT_ID" ]]; then
+        echo "Workflow ID: $WORKFLOW_CURRENT_ID" >&2
+        echo "Current Step: $WORKFLOW_CURRENT_STEP/$WORKFLOW_TOTAL_STEPS" >&2
+        echo "You can check detailed status with: pooltool workflow status $WORKFLOW_CURRENT_ID" >&2
+    else
+        echo "No active workflow" >&2
+    fi
+    
+    return 1
+}
+
+#
+# Graceful workflow abort with cleanup
+# $1: abort_reason
+#
+workflow_abort() {
+    local abort_reason="$1"
+    
+    if [[ -n "$WORKFLOW_CURRENT_ID" ]]; then
+        workflow_log "WARN" "Aborting workflow: $abort_reason"
+        workflow_complete "aborted" "$abort_reason"
+        
+        echo "🛑 WORKFLOW ABORTED" >&2
+        echo "═══════════════════════════════════════════════════════════════════" >&2
+        echo "Reason: $abort_reason" >&2
+        echo "" >&2
+        echo "✅ Cleanup completed successfully" >&2
+        echo "📋 Workflow state saved for reference" >&2
+    else
+        echo "⚠️  No active workflow to abort" >&2
+    fi
+}
+
+#
+# Emergency workflow stop with immediate cleanup
+#
+workflow_emergency_stop() {
+    echo "" >&2
+    echo "🚨 EMERGENCY WORKFLOW STOP" >&2
+    echo "═══════════════════════════════════════════════════════════════════" >&2
+    
+    # Immediate cleanup
+    workflow_sudo_cleanup
+    
+    if [[ -n "$WORKFLOW_CURRENT_ID" ]]; then
+        workflow_complete "emergency_stop" "Emergency stop requested"
+        echo "✅ Emergency cleanup completed" >&2
+        echo "📋 Workflow state preserved for analysis" >&2
+    fi
+    
+    echo "" >&2
+    echo "🔍 Next Steps:" >&2
+    echo "1. Review what went wrong" >&2
+    echo "2. Check system status before retrying" >&2
+    echo "3. Consider running safety checks first" >&2
+    
+    exit 1
+}
+
+# Set up signal handlers for graceful error handling
+trap 'workflow_emergency_stop' INT TERM

@@ -98,7 +98,7 @@ EOF
     return 0
 }
 
-function print_help {
+function test-background::print_help {
     cat << 'EOF'
 🧪 POOLTOOL BACKGROUND PROCESS TEST
 

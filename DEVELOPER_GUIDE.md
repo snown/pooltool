@@ -1,5 +1,16 @@
 # PooltTool Developer Guide
 
+## Framework Foundation
+
+PooltTool is built on the **[Bash with Nails](https://github.com/mindaugasbarysas/bashwithnails)** framework, which provides:
+
+- **Module System**: Automatic loading and dependency management
+- **Namespace Support**: Automatic function prefixing with namespaces  
+- **Named Parameters**: Function parameter validation
+- **Bootstrap Magic**: Automatic code transformation during module loading
+
+📖 **Framework Documentation**: [Bash with Nails Manual](https://github.com/mindaugasbarysas/bashwithnails/blob/master/docs/man.md)
+
 ## Module and Namespace Pattern
 
 When creating new commands for pooltool, follow this **exact pattern** used by all existing modules:
@@ -29,25 +40,47 @@ function helper_name {          # Helper functions use short names
 function commandname {          # Main command uses command name only
 ```
 
-### Internal Function Calls
+### Critical Namespace Collision Rule
 
-**❌ WRONG - Don't use full namespace for internal calls:**
+**🚨 CRITICAL**: Helper functions must be prefixed with module name to avoid namespace collisions!
+
+**❌ WRONG - Causes namespace collisions:**
 ```bash
-pooltool::commands::health::helper_name
+function print_help {          # Collides with other modules!
+function helper_function {     # Gets overwritten by last loaded module!
 ```
 
-**✅ CORRECT - Use `this::` prefix for internal calls:**
+**✅ CORRECT - Module-specific naming:**
 ```bash
-this::helper_name              # Bootstrap converts to full namespace
+function mycommand::print_help {      # Module-specific, no collision
+function mycommand::helper_function { # Safe from overwrites
+```
+
+**Why**: Multiple modules defining `function print_help` will overwrite each other when the Bash with Nails bootstrap transforms them all to `pooltool::commands::print_help`. The last loaded module wins, breaking all others.
+
+**Internal Function Calls**: Use `this::modulename::function_name` pattern:
+```bash
+# In mycommand module:
+this::mycommand::print_help    # → pooltool::commands::mycommand::print_help
 ```
 
 ### How Bootstrap Magic Works
 
-The bootstrap system (`/bootstrap.sh`) automatically transforms:
+The **Bash with Nails** bootstrap system (`bootstrap.sh`) automatically transforms your code during module loading:
 
-1. **Function definitions**: `func name {` → `func pooltool::commands::name {`
-2. **Internal calls**: `this::helper` → `pooltool::commands::commandname::helper`
-3. **Creates proper namespacing** without verbose function names in source
+1. **Function definitions**: `function name {` → `function pooltool::commands::name {`
+2. **Internal calls**: `this::helper` → `pooltool::commands::commandname::helper`  
+3. **Named parameters**: `function name(a b) {` → automatic parameter validation
+4. **Creates proper namespacing** without verbose function names in source
+
+This is why you write simple, clean function names in your source code, but they become fully namespaced when loaded.
+
+### Bash with Nails Key Features Used
+
+- **`#NAMESPACE=pooltool::commands`**: Declares the namespace for all functions in the module
+- **`this::`**: References functions within the same module namespace  
+- **`dependencies::depends`**: Automatic loading of required modules
+- **`dependencies::register_module`**: Registers module as loaded
 
 ### Example Template
 
@@ -57,33 +90,34 @@ The bootstrap system (`/bootstrap.sh`) automatically transforms:
 
 dependencies::register_module "pooltool/commands/mycommand"
 
-# Helper function - short name
-function print_help {
+# Helper function - MUST be prefixed with module name!
+function mycommand::print_help {
     cat << 'EOF'
 USAGE: pooltool mycommand [OPTIONS]
 EOF
 }
 
-# Another helper - short name  
-function parse_args {
-    # Call other helpers with this::
-    this::print_help
+# Another helper - MUST be prefixed with module name!
+function mycommand::parse_args {
+    # Call other helpers with this::modulename::
+    this::mycommand::print_help
 }
 
-# Main command function - matches command name
+# Main command function - matches command name only
 function mycommand {
-    this::parse_args "$@"
+    this::mycommand::parse_args "$@"
     # Implementation here
 }
 ```
 
 ### Existing Examples
 
-- `modules/pooltool/commands/disk` - Main: `func disk {`, Helpers: `func disk::*`
-- `modules/pooltool/commands/blink` - Main: `func blink {`, Helpers: `func blink::*` 
-- `modules/pooltool/commands/health` - Main: `func health {`, Helpers: `func *`
+- `modules/pooltool/commands/disk` - Main: `function disk {`, Helpers: `function disk::*`
+- `modules/pooltool/commands/blink` - Main: `function blink {`, Helpers: `function blink::*` 
+- `modules/pooltool/commands/health` - Main: `function health {`, Helpers: `function health::*`
+- `modules/pooltool/commands/workflow` - Main: `function workflow {`, Helpers: `function workflow::*`
 
-**Key Rule**: Let bootstrap handle the namespacing. Keep function names clean and simple in source code.
+**Key Rule**: Main command uses command name only. Helper functions use `commandname::helper_name` pattern to avoid namespace collisions. Let Bash with Nails bootstrap handle the full namespacing.
 
 ## Performance Best Practices
 
@@ -172,8 +206,21 @@ time ./pooltool.sh health --quiet
 
 **Problem**: Function not found after module loading
 ```bash
-❌ func pooltool::commands::health::helper_name {
-✅ function helper_name {
+❌ function print_help {                    # Namespace collision!
+✅ function mycommand::print_help {         # Module-specific
+```
+
+**Problem**: Functions overwriting each other between modules
+```bash
+❌ function print_help { # in multiple modules  # Last loaded wins!
+✅ function workflow::print_help {              # Safe namespace
+✅ function monitor::print_help {               # Safe namespace  
+```
+
+**Problem**: Incorrect internal function calls
+```bash
+❌ this::print_help                        # Resolves to wrong function
+✅ this::mycommand::print_help             # Resolves correctly
 ```
 
 **Problem**: Slow performance on multi-drive operations
@@ -184,25 +231,27 @@ time ./pooltool.sh health --quiet
 
 **Problem**: Bootstrap transformation not working
 ```bash
-❌ pooltool::commands::health::helper_call
-✅ this::helper_call
+❌ pooltool::commands::health::helper_call       # Don't use full namespace
+✅ this::health::helper_call                     # Use this:: pattern
 ```
 
 ## AI Assistant Guidelines
 
 **For AI assistants working on this project:**
 
-1. **ALWAYS** read this guide completely before making changes
+1. **ALWAYS** read this guide and the [Bash with Nails documentation](https://github.com/mindaugasbarysas/bashwithnails/blob/master/docs/man.md) completely before making changes
 2. **NEVER** use full namespace paths in function definitions  
-3. **ALWAYS** use bulk operations for multi-drive tasks
-4. **VERIFY** changes with the test commands shown above
-5. **UPDATE** this guide if you discover new patterns or issues
+3. **ALWAYS** prefix helper functions with module name (`modulename::helper`)
+4. **ALWAYS** use bulk operations for multi-drive tasks
+5. **VERIFY** changes with the test commands shown above
+6. **UPDATE** this guide if you discover new patterns or issues
 
 **Red Flags - Stop and reconsider if you see:**
-- Functions defined with full namespace patterns in the name
+- Functions defined with generic names like `print_help` (without module prefix)
+- Multiple modules with identical function names (namespace collision risk)
 - Health calls inside loops for multiple drives
 - Missing `#NAMESPACE=pooltool::commands` declarations
-- Commands that don't follow the template pattern
+- Commands that don't follow the Bash with Nails patterns
 
 ## Sudo Handling Best Practices
 

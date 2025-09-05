@@ -1724,6 +1724,290 @@ replace_add_step_integration() {
 }
 
 #
+# Recovery workflow step functions
+#
+
+#
+# Recovery Step 1: Assess failed drive and recovery options
+#
+replace_recovery_step_failed_assessment() {
+    local target_position="$1"
+    
+    echo ""
+    echo "🚨 Step 1: Failed Drive Assessment"
+    echo "─────────────────────────────────────────────────────────────────────"
+    
+    # Get drive information at target position
+    local drive_info
+    if ! drive_info=$(get_drive_info_by_position "$target_position" 2>/dev/null); then
+        echo "❌ Cannot retrieve drive information for position $target_position"
+        echo "   This may indicate the drive has completely failed"
+        
+        # Still allow recovery if position mapping exists
+        echo ""
+        echo "📋 Recovery Assessment:"
+        echo "• Target Position: $target_position" 
+        echo "• Drive Status: Not accessible or completely failed"
+        echo "• Recovery Method: SnapRAID parity rebuild (recommended)"
+        
+        if pooltool::question -p "Proceed with failed drive recovery at position $target_position?" -d "y"; then
+            # Store minimal target information for recovery
+            REPLACE_TARGET_POSITION="$target_position"
+            REPLACE_TARGET_DRIVE="FAILED_DRIVE_POS_$target_position"
+            REPLACE_TARGET_DEVICE="NONE"
+            REPLACE_TARGET_MODEL="Unknown (drive failed)"
+            
+            echo "✅ Failed drive assessment completed - proceeding with recovery"
+            return 0
+        else
+            echo "❌ Failed drive assessment cancelled by user"
+            return 1
+        fi
+    fi
+    
+    # Parse drive information for accessible drive
+    local drive_name device_path model
+    read -r drive_name device_path model <<< "$drive_info"
+    
+    echo "📊 Failed Drive Analysis for Position $target_position:"
+    echo "══════════════════════════════════════════════════════════════"
+    
+    # Show drive details
+    replace_show_drive_details "$target_position" "$drive_name" "$device_path" "$model"
+    
+    echo ""
+    echo "🔍 Drive Health Assessment:"
+    
+    # Try to get health information
+    local health_status="unknown"
+    if [[ -b "$device_path" ]]; then
+        local health_info
+        if health_info=$(pooltool health "$target_position" --quiet 2>/dev/null); then
+            echo "✅ Drive is still accessible for health checks"
+            echo "   Health Status: $health_info"
+            
+            # Determine if this is truly a failed drive or just a replacement
+            echo ""
+            echo "💡 Drive appears to be accessible. This may be:"
+            echo "1️⃣  Preventive replacement (drive showing warnings)"
+            echo "2️⃣  Failed drive replacement (drive has critical errors)"
+            echo "3️⃣  Capacity upgrade (replacing working drive with larger one)"
+            
+            local failure_type
+            while true; do
+                failure_type=$(bashful input -p "What type of replacement is this? (1-3)" -d "2")
+                case "$failure_type" in
+                    1) 
+                        echo "🔄 Treating as preventive replacement"
+                        break
+                        ;;
+                    2)
+                        echo "🚨 Treating as failed drive replacement" 
+                        health_status="critical"
+                        break
+                        ;;
+                    3)
+                        echo "📈 This appears to be an upgrade - consider using upgrade workflow instead"
+                        if pooltool::question -p "Continue with recovery workflow anyway?" -d "n"; then
+                            break
+                        else
+                            return 1
+                        fi
+                        ;;
+                    *)
+                        echo "Please enter 1, 2, or 3"
+                        ;;
+                esac
+            done
+        else
+            echo "❌ Drive health check failed - treating as failed drive"
+            health_status="critical"
+        fi
+    else
+        echo "❌ Drive device not accessible - drive has completely failed"
+        health_status="failed"
+    fi
+    
+    # Show SnapRAID integration details
+    replace_show_snapraid_integration "$drive_name"
+    
+    echo ""
+    echo "⚠️  RECOVERY CONSIDERATIONS:"
+    echo "• Failed drive recovery uses SnapRAID parity to rebuild data"
+    echo "• Array must be in sync for safe recovery"
+    echo "• Recovery process may take 2-8 hours depending on drive size"
+    echo "• New replacement drive must be installed before data recovery"
+    echo "• System will remain operational during most of the process"
+    
+    echo ""
+    if ! pooltool::question -p "Do you want to proceed with failed drive recovery at position $target_position?" -d "y"; then
+        return 1
+    fi
+    
+    # Store target information globally for other steps
+    REPLACE_TARGET_POSITION="$target_position"
+    REPLACE_TARGET_DRIVE="$drive_name"
+    REPLACE_TARGET_DEVICE="$device_path"
+    REPLACE_TARGET_MODEL="$model"
+    REPLACE_HEALTH_STATUS="$health_status"
+    
+    echo "✅ Failed drive assessment completed - Position $target_position confirmed for recovery"
+    return 0
+}
+
+#
+# Recovery Step 2: Check SnapRAID parity status and array health
+#
+replace_recovery_step_parity_check() {
+    echo ""
+    echo "🛡️  Step 2: SnapRAID Parity Check"
+    echo "─────────────────────────────────────────────────────────────────────"
+    
+    echo "🔍 Checking SnapRAID array status and parity health..."
+    
+    # Check if SnapRAID is configured
+    local snapraid_config="/etc/snapraid.conf"
+    if [[ ! -f "$snapraid_config" ]]; then
+        echo "❌ SnapRAID configuration not found at $snapraid_config"
+        echo "   Cannot proceed with parity-based recovery"
+        return 1
+    fi
+    
+    echo "✅ SnapRAID configuration found"
+    
+    # Check SnapRAID status
+    echo ""
+    echo "📊 SnapRAID Array Status:"
+    echo "─────────────────────────────"
+    
+    # Run snapraid status to check array health
+    local snapraid_status_output
+    if snapraid_status_output=$(snapraid status 2>&1); then
+        echo "✅ SnapRAID status check completed"
+        
+        # Extract key information from status
+        local sync_status=""
+        local parity_status=""
+        
+        if echo "$snapraid_status_output" | grep -q "Everything OK"; then
+            echo "✅ Array status: Everything OK"
+            sync_status="ok"
+        elif echo "$snapraid_status_output" | grep -q "You have [0-9]* unsync"; then
+            local unsync_count=$(echo "$snapraid_status_output" | grep -o "You have [0-9]* unsync" | grep -o "[0-9]*")
+            echo "⚠️  Array status: $unsync_count unsynchronized files detected"
+            sync_status="unsync"
+        else
+            echo "⚠️  Array status: Unknown - manual review required"
+            sync_status="unknown"
+        fi
+        
+        # Check for parity drive health
+        echo ""
+        echo "🔍 Parity Drive Health:"
+        local parity_drives=( $(snapraid::devices names | grep -E "^P[PU][UP][0-9]+" || true) )
+        
+        if [[ ${#parity_drives[@]} -gt 0 ]]; then
+            for parity_drive in "${parity_drives[@]}"; do
+                echo "   Checking $parity_drive..."
+                local parity_health
+                if parity_health=$(pooltool health --quiet | grep "$parity_drive" 2>/dev/null); then
+                    echo "   ✅ $parity_drive: $parity_health"
+                else
+                    echo "   ⚠️  $parity_drive: Unable to check health"
+                fi
+            done
+            echo "✅ Parity drives appear operational"
+            parity_status="ok"
+        else
+            echo "❌ No parity drives detected in array"
+            parity_status="missing"
+        fi
+        
+    else
+        echo "❌ SnapRAID status check failed:"
+        echo "$snapraid_status_output"
+        return 1
+    fi
+    
+    echo ""
+    echo "🎯 Recovery Feasibility Assessment:"
+    echo "══════════════════════════════════════════════════════════════"
+    
+    # Assess recovery feasibility based on status
+    local recovery_safe=true
+    local recovery_recommendations=()
+    
+    case "$sync_status" in
+        "ok")
+            echo "✅ Array Sync Status: Perfect - safe for recovery"
+            ;;
+        "unsync")
+            echo "⚠️  Array Sync Status: Unsynchronized files detected"
+            recovery_recommendations+=("Consider running 'snapraid sync' before recovery if possible")
+            if [[ "$REPLACE_HEALTH_STATUS" == "failed" ]]; then
+                echo "   Note: Sync may not be possible with failed drive"
+            fi
+            ;;
+        "unknown")
+            echo "❓ Array Sync Status: Unknown - manual assessment needed"
+            recovery_safe=false
+            ;;
+    esac
+    
+    case "$parity_status" in
+        "ok")
+            echo "✅ Parity Status: Available and healthy"
+            ;;
+        "missing")
+            echo "❌ Parity Status: No parity drives available"
+            echo "   Cannot perform parity-based recovery"
+            recovery_safe=false
+            ;;
+    esac
+    
+    if [[ "$recovery_safe" == true ]]; then
+        echo ""
+        echo "🎉 RECOVERY ASSESSMENT: SAFE TO PROCEED"
+        echo "✅ SnapRAID parity recovery is feasible"
+        
+        if [[ ${#recovery_recommendations[@]} -gt 0 ]]; then
+            echo ""
+            echo "💡 Recommendations:"
+            for rec in "${recovery_recommendations[@]}"; do
+                echo "   • $rec"
+            done
+        fi
+        
+        echo ""
+        if pooltool::question -p "Proceed with SnapRAID parity-based recovery?" -d "y"; then
+            echo "✅ Parity check completed - recovery approved"
+            return 0
+        else
+            echo "❌ Recovery cancelled by user"
+            return 1
+        fi
+    else
+        echo ""
+        echo "🚨 RECOVERY ASSESSMENT: NOT SAFE"
+        echo "❌ Parity-based recovery is not feasible with current array status"
+        echo ""
+        echo "🛠️  Manual Recovery Options:"
+        echo "1. Restore from backup if available"
+        echo "2. Attempt manual data recovery if drive is partially accessible"
+        echo "3. Accept data loss and initialize new drive"
+        
+        echo ""
+        if pooltool::question -p "Do you want to continue anyway with alternative recovery?" -d "n"; then
+            echo "⚠️  Proceeding with alternative recovery - data loss possible"
+            return 0
+        else
+            echo "❌ Recovery workflow aborted due to unsafe conditions"
+            return 1
+        fi
+    fi
+}
+
+#
 # Common utility functions used across all workflows
 #
 

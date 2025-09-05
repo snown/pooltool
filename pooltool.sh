@@ -21,6 +21,7 @@ bootstrap_load_module pooltool/commands/drivemap
 bootstrap_load_module pooltool/commands/health
 bootstrap_load_module pooltool/commands/replace-drive
 bootstrap_load_module pooltool/commands/monitor
+bootstrap_load_module pooltool/commands/workflow
 bootstrap_load_module pooltool/commands/test-background
 bootstrap_load_module pooltool/driveutils
 bootstrap_load_module pooltool/drivevisualizer
@@ -52,6 +53,7 @@ COMMANDS:
   blink       Blink drive LEDs to identify drives in snapraid
   replace-drive  Guided workflow for safe drive replacement
   monitor     Monitor and manage background processes
+  workflow    Manage and monitor workflows
 
 EXAMPLES:
   pooltool devices                    # Show all snapraid devices
@@ -65,6 +67,7 @@ EXAMPLES:
   pooltool drivemap --numbered        # Show numbered drive positions  
   pooltool replace-drive              # Start drive replacement wizard
   pooltool monitor                    # Show active background processes
+  pooltool workflow list              # Show all workflows
   pooltool find /path/to/search       # Find files in pool
 
 For detailed help on a specific command, use:
@@ -195,6 +198,16 @@ function main {
       pooltool::commands::monitor "$@"
     else
       echo "'monitor' command not currently supported"
+      print_help
+      exit 1
+    fi
+    ;;
+  workflow)
+    if command -v pooltool::commands::workflow &>/dev/null; then
+      shift
+      pooltool::commands::workflow "$@"
+    else
+      echo "'workflow' command not currently supported"
       print_help
       exit 1
     fi

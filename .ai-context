@@ -2,6 +2,8 @@
 
 This file provides essential context for AI assistants working on the PooltTool project.
 
+**🔧 FRAMEWORK**: This project is built on **[Bash with Nails](https://github.com/mindaugasbarysas/bashwithnails)**, a bash framework providing module loading, namespacing, and dependency management.
+
 ## MANDATORY READING BEFORE ANY CODE CHANGES
 
 🚨 **STOP**: You MUST read these files before making any modifications:
@@ -18,8 +20,8 @@ This file provides essential context for AI assistants working on the PooltTool 
 - Phase-by-phase development progress
 - **Essential for understanding the system design**
 
-### 3. bootstrap.sh
-- Core module loading mechanism
+### 3. bootstrap.sh + [Bash with Nails Documentation](https://github.com/mindaugasbarysas/bashwithnails/blob/master/docs/man.md)
+- Core module loading mechanism (Bash with Nails framework)
 - Automatic namespace transformation rules
 - **Critical to understand before writing any functions**
 
@@ -48,24 +50,18 @@ pooltool drivemap | grep "Position 1"
 # Then use pooltool::create_unified_mapping in your code
 ```
 
-❌ **DON'T**: Use full namespaces in function definitions
+❌ **DON'T**: Use generic function names that cause namespace collisions
 ```bash
-### Example Patterns
-```bash
-# WRONG! Full namespace in function definitions
-func pooltool::commands::health::helper {  # WRONG! (pseudo-code)
-    # This triggers validation errors
-}
-
-# CORRECT! Short names with bootstrap transformation
-function helper {  # ✅ CORRECT!
-    # Bootstrap transforms this automatically
-}
+# WRONG! Multiple modules with same function name
+function print_help {  # This will overwrite other modules' print_help!
+function helper {      # Gets overwritten by last loaded module!
 ```
 
-✅ **DO**: Use short names, let bootstrap handle namespacing
+✅ **DO**: Prefix helper functions with module name
 ```bash
-function helper {  # CORRECT - bootstrap transforms this
+# CORRECT! Module-specific naming prevents collisions
+function workflow::print_help {  # Safe from overwrites
+function monitor::helper {       # Each module has own namespace
 ```
 
 ❌ **DON'T**: Make individual health calls for multiple drives
@@ -82,14 +78,16 @@ pooltool::get_all_health_info_efficient "$controller" "${unified_array[@]}"  # F
 
 ## PROJECT PRINCIPLES
 
-1. **Performance First**: Always use bulk operations for multi-drive tasks
-2. **Bootstrap Compatibility**: Follow the module/namespace pattern exactly
-3. **Backward Compatibility**: Don't break existing command interfaces
-4. **Documentation**: Update relevant .md files when adding features
-5. **Testing**: Use built-in test commands to verify changes
+1. **Framework Compliance**: Follow [Bash with Nails](https://github.com/mindaugasbarysas/bashwithnails) patterns exactly
+2. **Performance First**: Always use bulk operations for multi-drive tasks
+3. **Namespace Safety**: Prefix helper functions with module name to avoid collisions
+4. **Backward Compatibility**: Don't break existing command interfaces
+5. **Documentation**: Update relevant .md files when adding features
+6. **Testing**: Use built-in test commands to verify changes
 
 ## CURRENT ARCHITECTURE
 
+- **Framework**: Built on [Bash with Nails](https://github.com/mindaugasbarysas/bashwithnails) for module system and namespacing
 - **Module System**: Bootstrap-based with automatic namespace transformation
 - **Data Layer**: Unified device mapping with efficient caching
 - **Performance**: 20x optimization through bulk SMART data collection

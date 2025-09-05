@@ -1,5 +1,7 @@
 # PooltTool Project Structure - Quick Reference
 
+**🔧 Built on [Bash with Nails](https://github.com/mindaugasbarysas/bashwithnails)** - Framework providing module loading, namespacing, and dependency management.
+
 ## 📁 Essential Files for AI Assistants
 
 ```
@@ -8,7 +10,7 @@ pooltool/
 ├── 📖 DEVELOPER_GUIDE.md           # 🚨 MANDATORY: Coding patterns & performance
 ├── 📖 .ai-context                  # 🚨 MANDATORY: AI assistant guidelines
 ├── 📖 INTERACTIVE_DRIVE_MANAGEMENT_PLAN.md  # 🚨 Architecture & status
-├── 🔧 bootstrap.sh                 # 🚨 CRITICAL: Module system core
+├── 🔧 bootstrap.sh                 # 🚨 CRITICAL: Bash with Nails module system core
 ├── 🔧 pooltool.sh                  # Main entry point + test commands
 │
 ├── 📁 modules/pooltool/
@@ -29,9 +31,10 @@ pooltool/
 ## 🚨 Before Making ANY Changes
 
 1. **Read**: DEVELOPER_GUIDE.md, .ai-context, INTERACTIVE_DRIVE_MANAGEMENT_PLAN.md
-2. **Understand**: Bootstrap namespace transformation in bootstrap.sh
-3. **Test**: Use `./pooltool.sh test-*` commands for validation
-4. **Follow**: Exact patterns from existing commands
+2. **Study**: [Bash with Nails Documentation](https://github.com/mindaugasbarysas/bashwithnails/blob/master/docs/man.md)
+3. **Understand**: Bootstrap namespace transformation in bootstrap.sh
+4. **Test**: Use `./pooltool.sh test-*` commands for validation
+5. **Follow**: Exact patterns from existing commands
 
 ## 🔥 Critical Performance Rules
 
@@ -39,16 +42,16 @@ pooltool/
 - ❌ **Individual loops**: `for drive; do get_drive_health; done`
 - ⚡ **Result**: 20x performance difference
 
-## 🎯 Namespace Pattern
+## 🎯 Namespace Pattern (Bash with Nails)
 
 ```bash
 # In modules/pooltool/commands/mycommand:
 #NAMESPACE=pooltool::commands
 
-function print_help {          # ✅ Short name
-function mycommand {           # ✅ Command name
-    this::print_help           # ✅ Use this:: for internal calls
+function mycommand::print_help {    # ✅ Module-prefixed (avoids collisions)
+function mycommand {               # ✅ Main command name
+    this::mycommand::print_help    # ✅ Use this::modulename:: for internal calls
 }
 ```
 
-Bootstrap automatically transforms to full namespaces. Never write them manually!
+**Critical**: Helper functions MUST be prefixed with module name to avoid namespace collisions between modules. The Bash with Nails bootstrap automatically transforms to full namespaces.

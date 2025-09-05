@@ -1,22 +1,26 @@
 # pooltool - Interactive Drive Management System
 
+**🔧 Built on [Bash with Nails](https://github.com/mindaugasbarysas/bashwithnails)** - A bash framework providing module loading, namespacing, and dependency management.
+
 ## 🤖 **FOR AI AGENTS: REQUIRED READING**
 
 **⚠️ CRITICAL: Before making ANY changes to this codebase, you MUST read these files:**
 
 1. **[DEVELOPER_GUIDE.md](./DEVELOPER_GUIDE.md)** - Module patterns, namespace conventions, performance best practices
 2. **[INTERACTIVE_DRIVE_MANAGEMENT_PLAN.md](./INTERACTIVE_DRIVE_MANAGEMENT_PLAN.md)** - Architecture overview and implementation status  
-3. **[bootstrap.sh](./bootstrap.sh)** - Understand the module loading system
+3. **[bootstrap.sh](./bootstrap.sh)** - Understand the module loading system (Bash with Nails framework)
+4. **[Bash with Nails Documentation](https://github.com/mindaugasbarysas/bashwithnails/blob/master/docs/man.md)** - Framework patterns and features
 
 **Key Rules for AI Agents:**
-- ✅ Always follow the namespace pattern in DEVELOPER_GUIDE.md
+- ✅ Always follow the [Bash with Nails](https://github.com/mindaugasbarysas/bashwithnails) framework patterns
+- ✅ Prefix helper functions with module name (e.g., `modulename::helper`) to avoid namespace collisions
 - ✅ Use bulk health collection functions (not per-drive calls)
 - ✅ Test changes with existing test commands in pooltool.sh
-- ❌ Never use full namespaces in function definitions
+- ❌ Never use generic function names like `print_help` without module prefix
 - ❌ Never make individual arcconf calls for multiple drives
 
 ## Overview
-`pooltool` is a modular Bash-based utility for managing files and disks in a RAID storage environment. It provides commands for finding, copying, moving files, and managing disks and SnapRAID devices, with advanced interactive drive management and health monitoring capabilities.
+`pooltool` is a modular Bash-based utility built on the **[Bash with Nails](https://github.com/mindaugasbarysas/bashwithnails)** framework for managing files and disks in a RAID storage environment. It provides commands for finding, copying, moving files, and managing disks and SnapRAID devices, with advanced interactive drive management and health monitoring capabilities.
 
 ## Usage
 
@@ -39,6 +43,7 @@ Use `-h` or `--help` with any command for usage information:
 ```
 
 ## Functionality
+- **Framework**: Built on [Bash with Nails](https://github.com/mindaugasbarysas/bashwithnails) providing module loading and namespacing
 - Modular design: Commands are loaded dynamically via `bootstrap.sh`.
 - Namespace support: Each command is namespaced for clarity and isolation.
 - Dependency management: Modules declare dependencies and are loaded as needed.

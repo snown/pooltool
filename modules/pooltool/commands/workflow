@@ -1,0 +1,245 @@
+#!/bin/bash
+
+# Pooltool Workflow Management Command
+# Part of Phase 3.2: Advanced Workflows - Session 3 completion
+# Created: September 5, 2025
+
+#NAMESPACE=pooltool::commands
+
+#
+# Print help information for workflow command
+#
+function workflow::print_help {
+    cat << 'EOF'
+POOLTOOL WORKFLOW MANAGEMENT
+
+USAGE:
+    pooltool workflow <subcommand> [options]
+
+DESCRIPTION:
+    Manage and monitor pooltool workflows for drive replacement,
+    maintenance operations, and system management tasks.
+
+SUBCOMMANDS:
+    list                 List all workflows (active and completed)
+    status <id>          Show detailed status of specific workflow
+    progress <id>        Show real-time progress for active workflow
+    logs <id>            Show workflow logs
+    abort <id>           Abort a running workflow
+    cleanup [days]       Clean up old workflow files (default: 30 days)
+    help                 Show this help message
+
+WORKFLOW STATUSES:
+    running              Workflow is currently executing
+    success              Workflow completed successfully
+    failed               Workflow failed with errors
+    aborted              Workflow was cancelled by user
+    emergency_stop       Workflow stopped due to emergency
+
+EXAMPLES:
+    pooltool workflow list                    # Show all workflows
+    pooltool workflow status drive_upgrade_123 # Show specific workflow
+    pooltool workflow progress drive_upgrade_123 # Live progress view
+    pooltool workflow logs drive_upgrade_123    # View workflow logs
+    pooltool workflow abort drive_upgrade_123   # Stop running workflow
+    pooltool workflow cleanup 7               # Clean workflows older than 7 days
+
+WORKFLOW FILES:
+    State Files:    /tmp/pooltool-workflows/
+    Log Files:      ~/.pooltool/logs/ (or /var/log/pooltool/)
+
+For more information about specific workflows, use:
+    pooltool replace-drive --help
+    pooltool help workflows
+EOF
+}
+
+#
+# List all workflows
+#
+function workflow::workflow_list {
+    bootstrap_load_module pooltool/workflows/workflow_engine
+    workflow_list
+}
+
+#
+# Show workflow status
+#
+function workflow::workflow_status {
+    local workflow_id="$1"
+    
+    if [[ -z "$workflow_id" ]]; then
+        echo "Error: Workflow ID required" >&2
+        echo "Use 'pooltool workflow list' to see available workflows" >&2
+        return 1
+    fi
+    
+    bootstrap_load_module pooltool/workflows/workflow_engine
+    workflow_status "$workflow_id"
+}
+
+#
+# Show detailed workflow progress
+#
+function workflow::workflow_progress {
+    local workflow_id="$1"
+    
+    if [[ -z "$workflow_id" ]]; then
+        echo "Error: Workflow ID required" >&2
+        echo "Use 'pooltool workflow list' to see available workflows" >&2
+        return 1
+    fi
+    
+    bootstrap_load_module pooltool/workflows/workflow_engine
+    
+    # Set the workflow ID for progress display
+    WORKFLOW_CURRENT_ID="$workflow_id"
+    workflow_progress_detailed
+}
+
+#
+# Show workflow logs
+#
+function workflow::workflow_logs {
+    local workflow_id="$1"
+    local follow_flag="$2"
+    
+    if [[ -z "$workflow_id" ]]; then
+        echo "Error: Workflow ID required" >&2
+        echo "Use 'pooltool workflow list' to see available workflows" >&2
+        return 1
+    fi
+    
+    # Determine log file location
+    local log_file=""
+    
+    # Check system log directory first
+    if [[ -f "/var/log/pooltool/workflow.log" ]]; then
+        log_file="/var/log/pooltool/workflow.log"
+    elif [[ -f "$HOME/.pooltool/logs/workflow.log" ]]; then
+        log_file="$HOME/.pooltool/logs/workflow.log"
+    else
+        echo "Error: No workflow log file found" >&2
+        echo "Expected locations:" >&2
+        echo "  /var/log/pooltool/workflow.log" >&2
+        echo "  $HOME/.pooltool/logs/workflow.log" >&2
+        return 1
+    fi
+    
+    echo "📋 WORKFLOW LOGS: $workflow_id"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo "Log file: $log_file"
+    echo ""
+    
+    if [[ "$follow_flag" == "--follow" || "$follow_flag" == "-f" ]]; then
+        echo "Following log file (Ctrl+C to stop)..."
+        echo ""
+        tail -f "$log_file" | grep "$workflow_id"
+    else
+        # Show recent logs for this workflow
+        grep "$workflow_id" "$log_file" | tail -50
+    fi
+}
+
+#
+# Abort a running workflow
+#
+function workflow::workflow_abort {
+    local workflow_id="$1"
+    
+    if [[ -z "$workflow_id" ]]; then
+        echo "Error: Workflow ID required" >&2
+        echo "Use 'pooltool workflow list' to see available workflows" >&2
+        return 1
+    fi
+    
+    bootstrap_load_module pooltool/workflows/workflow_engine
+    
+    # Check if workflow exists and is running
+    local state_file="/tmp/pooltool-workflows/${workflow_id}.state"
+    if [[ ! -f "$state_file" ]]; then
+        echo "Error: Workflow not found: $workflow_id" >&2
+        return 1
+    fi
+    
+    local status=$(grep "status=" "$state_file" | cut -d'=' -f2)
+    if [[ "$status" != "running" ]]; then
+        echo "Error: Workflow is not running (status: $status)" >&2
+        return 1
+    fi
+    
+    echo "⚠️  ABORT WORKFLOW: $workflow_id"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo "Current Status: $status"
+    echo ""
+    echo "This will stop the workflow and clean up resources."
+    echo "Any in-progress operations will be interrupted."
+    
+    if pooltool::question -p "Are you sure you want to abort this workflow?" -d "n"; then
+        # Set workflow as current for abort function
+        WORKFLOW_CURRENT_ID="$workflow_id"
+        workflow_abort "User requested abort via workflow command"
+        echo "✅ Workflow aborted successfully"
+    else
+        echo "❌ Abort cancelled"
+        return 1
+    fi
+}
+
+#
+# Clean up old workflow files
+#
+function workflow::workflow_cleanup {
+    local days_old="${1:-30}"
+    
+    if ! [[ "$days_old" =~ ^[0-9]+$ ]]; then
+        echo "Error: Days must be a number" >&2
+        return 1
+    fi
+    
+    echo "🧹 CLEANUP OLD WORKFLOWS"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo "Removing workflows older than $days_old days..."
+    
+    bootstrap_load_module pooltool/workflows/workflow_engine
+    workflow_cleanup "$days_old"
+    
+    echo "✅ Cleanup completed"
+}
+
+#
+# Main workflow command function
+#
+function workflow {
+    local subcommand="$1"
+    shift
+    
+    case "$subcommand" in
+        "list")
+            this::workflow::workflow_list "$@"
+            ;;
+        "status")
+            this::workflow::workflow_status "$@"
+            ;;
+        "progress")
+            this::workflow::workflow_progress "$@"
+            ;;
+        "logs")
+            this::workflow::workflow_logs "$@"
+            ;;
+        "abort")
+            this::workflow::workflow_abort "$@"
+            ;;
+        "cleanup")
+            this::workflow::workflow_cleanup "$@"
+            ;;
+        "help"|"--help"|"-h"|"")
+            this::workflow::print_help
+            ;;
+        *)
+            echo "Error: Unknown subcommand '$subcommand'" >&2
+            echo "Use 'pooltool workflow help' for usage information" >&2
+            return 1
+            ;;
+    esac
+}
