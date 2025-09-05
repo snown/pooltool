@@ -162,6 +162,9 @@ replace_workflow_upgrade() {
         return 1
     fi
     
+    # Set global workflow ID for subsequent workflow functions
+    WORKFLOW_CURRENT_ID="$workflow_id"
+    
     echo "📋 Upgrade Workflow ID: $workflow_id"
     echo ""
     
@@ -257,6 +260,9 @@ replace_workflow_recovery() {
         echo "❌ Failed to initialize workflow system"
         return 1
     fi
+    
+    # Set global workflow ID for subsequent workflow functions
+    WORKFLOW_CURRENT_ID="$workflow_id"
     
     echo "📋 Recovery Workflow ID: $workflow_id"
     echo ""

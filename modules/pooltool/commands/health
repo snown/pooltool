@@ -178,14 +178,25 @@ function get_drive_health_data {
     # Search for drive at specified position
     for unified_entry in "${unified_array[@]}"; do
         if [[ "$unified_entry" =~ ^([^:]+):([^:]+):([^:]+):([^:]+):([^:]*):([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
-            local mount_name="${BASH_REMATCH[1]}"
-            local snapraid_name="${BASH_REMATCH[2]}"
-            local rec_connector="${BASH_REMATCH[3]}"
-            local rec_device="${BASH_REMATCH[4]}"
-            local mount_path="${BASH_REMATCH[5]}"
-            local system_device="${BASH_REMATCH[6]}"
-            local controller="${BASH_REMATCH[7]}"
-            local arcconf_position="${BASH_REMATCH[8]}"
+            local mount_name="${BASH_REMATCH[1]}"        # DRU03, NEW-14T, etc.
+            local position_field="${BASH_REMATCH[2]}"    # Position number
+            local rec_connector="${BASH_REMATCH[3]}"     # Connector
+            local rec_device="${BASH_REMATCH[4]}"        # Device slot
+            local snapraid_role="${BASH_REMATCH[5]}"     # data3, parity, NONE
+            local system_device="${BASH_REMATCH[6]}"     # /dev/sdd or NONE
+            local wwn="${BASH_REMATCH[7]}"               # WWN
+            local serial="${BASH_REMATCH[8]}"            # Serial number
+            local channel="${BASH_REMATCH[9]}"           # Channel
+            local device_num="${BASH_REMATCH[10]}"       # Device number  
+            local model="${BASH_REMATCH[11]}"            # Drive model
+            local size="${BASH_REMATCH[12]}"             # Drive size
+            local type="${BASH_REMATCH[13]}"             # Type/status
+            
+            # Mount path for SnapRAID drives
+            local mount_path=""
+            if [[ "$snapraid_role" != "NONE" ]]; then
+                mount_path="/mnt/$mount_name"
+            fi
             
             # Calculate position using the same logic as select command
             local calc_position=$(( rec_connector * 4 + (4 - rec_device) ))
@@ -194,17 +205,30 @@ function get_drive_health_data {
                 drive_found=true
                 
                 # Get health information
-                if [[ "$system_device" != "N/A" ]]; then
+                if [[ "$system_device" != "NONE" && "$system_device" != "N/A" ]]; then
                     health_data=$(pooltool::get_drive_health "$system_device" "$main_controller")
                     if [[ "$health_data" =~ ^([^:]+):([^:]+):([^:]+):([^:]+)$ ]]; then
-                        echo "found:$position:$system_device:$mount_name:$mount_path:$health_data"
+                        # Format: found:position:device:name_or_role:mount_or_type:health_data
+                        if [[ "$snapraid_role" == "NONE" ]]; then
+                            echo "found:$position:$system_device:$mount_name:unallocated:$health_data"
+                        else
+                            echo "found:$position:$system_device:$snapraid_role:$mount_path:$health_data"
+                        fi
                         return 0
                     else
-                        echo "error:$position:$system_device:$snapraid_name:$mount_path:Unable to retrieve health data"
+                        if [[ "$snapraid_role" == "NONE" ]]; then
+                            echo "error:$position:$system_device:$mount_name:unallocated:Unable to retrieve health data"
+                        else
+                            echo "error:$position:$system_device:$snapraid_role:$mount_path:Unable to retrieve health data"
+                        fi
                         return 5
                     fi
                 else
-                    echo "unavailable:$position:N/A:$mount_name:$mount_path:Drive not accessible"
+                    if [[ "$snapraid_role" == "NONE" ]]; then
+                        echo "unavailable:$position:NONE:$mount_name:unallocated:Drive not accessible"
+                    else
+                        echo "unavailable:$position:NONE:$snapraid_role:$mount_path:Drive not accessible"
+                    fi
                     return 2
                 fi
             fi
@@ -234,8 +258,16 @@ function output_json_single {
         echo "{"
         echo "  \"position\": $position,"
         echo "  \"device\": \"$device\","
-        echo "  \"snapraid_name\": \"$snapraid\","
-        echo "  \"mount_path\": \"$mount\","
+        
+        if [[ "$mount" == "unallocated" ]]; then
+            echo "  \"drive_name\": \"$snapraid\","
+            echo "  \"status_type\": \"unallocated\","
+            echo "  \"in_snapraid\": false,"
+        else
+            echo "  \"snapraid_role\": \"$snapraid\","
+            echo "  \"mount_path\": \"$mount\","
+            echo "  \"in_snapraid\": true,"
+        fi
         
         if [[ "$status" == "found" && "$health_info" =~ ^([^:]+):([^:]+):([^:]+):([^:]+)$ ]]; then
             local health_status="${BASH_REMATCH[1]}"
@@ -290,8 +322,16 @@ function output_standard_single {
             else
                 printf "  %-20s %s\n" "Position:" "$position"
                 printf "  %-20s %s\n" "Device:" "$device"
-                printf "  %-20s %s\n" "SnapRAID Name:" "$snapraid"
-                printf "  %-20s %s\n" "Mount Path:" "$mount"
+                
+                # Show appropriate label based on whether drive is in SnapRAID array
+                if [[ "$mount" == "unallocated" ]]; then
+                    printf "  %-20s %s\n" "Drive Name:" "$snapraid"
+                    printf "  %-20s %s\n" "Status:" "Unallocated (not in SnapRAID)"
+                else
+                    printf "  %-20s %s\n" "SnapRAID Role:" "$snapraid"
+                    printf "  %-20s %s\n" "Mount Path:" "$mount"
+                fi
+                
                 printf "  %-20s %s\n" "Health Status:" "$status_display"
                 printf "  %-20s %s°C\n" "Temperature:" "$temperature"
                 printf "  %-20s %s hours\n" "Power-On Time:" "$power_hours"

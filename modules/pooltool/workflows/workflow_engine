@@ -34,15 +34,38 @@ workflow_engine_init() {
     
     # Create log directory if it doesn't exist
     if [[ ! -d "$WORKFLOW_LOG_DIR" ]]; then
-        if sudo mkdir -p "$WORKFLOW_LOG_DIR" 2>/dev/null; then
-            sudo chmod 755 "$WORKFLOW_LOG_DIR"
+        # Try to create system log directory with proper permissions
+        if sudo mkdir -p "$WORKFLOW_LOG_DIR" 2>/dev/null && sudo chmod 755 "$WORKFLOW_LOG_DIR" 2>/dev/null; then
+            # Make it writable by current user
+            if ! sudo chown "$USER:$USER" "$WORKFLOW_LOG_DIR" 2>/dev/null; then
+                # If we can't make it user-writable, fallback immediately
+                WORKFLOW_LOG_DIR="$HOME/.pooltool/logs"
+                mkdir -p "$WORKFLOW_LOG_DIR" || {
+                    echo "Warning: Cannot create log directory, logging disabled" >&2
+                    WORKFLOW_LOG_DIR=""
+                }
+            fi
         else
-            # Fallback to user directory if no sudo access
+            # Fallback to user directory if no sudo access or creation fails
             WORKFLOW_LOG_DIR="$HOME/.pooltool/logs"
             mkdir -p "$WORKFLOW_LOG_DIR" || {
                 echo "Warning: Cannot create log directory, logging disabled" >&2
                 WORKFLOW_LOG_DIR=""
             }
+        fi
+    fi
+    
+    # Test write permissions to log directory
+    if [[ -n "$WORKFLOW_LOG_DIR" && -d "$WORKFLOW_LOG_DIR" ]]; then
+        if ! touch "$WORKFLOW_LOG_DIR/test.tmp" 2>/dev/null; then
+            echo "Warning: Log directory not writable, using fallback: $HOME/.pooltool/logs" >&2
+            WORKFLOW_LOG_DIR="$HOME/.pooltool/logs"
+            mkdir -p "$WORKFLOW_LOG_DIR" || {
+                echo "Warning: Cannot create log directory, logging disabled" >&2
+                WORKFLOW_LOG_DIR=""
+            }
+        else
+            rm -f "$WORKFLOW_LOG_DIR/test.tmp" 2>/dev/null
         fi
     fi
     
@@ -214,13 +237,13 @@ workflow_log() {
     local message="$2"
     local timestamp=$(date -Iseconds)
     
-    # Log to console with color coding
+    # Log to console with color coding (all to stderr to avoid interfering with command substitution)
     case "$level" in
         "ERROR") echo -e "\033[31m[$timestamp] $level: $message\033[0m" >&2 ;;
         "WARN")  echo -e "\033[33m[$timestamp] $level: $message\033[0m" >&2 ;;
-        "INFO")  echo -e "\033[32m[$timestamp] $level: $message\033[0m" ;;
-        "DEBUG") echo -e "\033[36m[$timestamp] $level: $message\033[0m" ;;
-        *)       echo "[$timestamp] $level: $message" ;;
+        "INFO")  echo -e "\033[32m[$timestamp] $level: $message\033[0m" >&2 ;;
+        "DEBUG") echo -e "\033[36m[$timestamp] $level: $message\033[0m" >&2 ;;
+        *)       echo "[$timestamp] $level: $message" >&2 ;;
     esac
     
     # Log to file if directory available
