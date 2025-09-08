@@ -186,7 +186,20 @@ workflow_step() {
                 local progress_percent=$((step_number * 100 / WORKFLOW_TOTAL_STEPS))
                 echo "   Progress: $progress_percent% [$(printf '%*s' $((step_number * 20 / WORKFLOW_TOTAL_STEPS)) '' | tr ' ' '▓')$(printf '%*s' $((20 - step_number * 20 / WORKFLOW_TOTAL_STEPS)) '' | tr ' ' '░')]" >&2
             else
-                echo "   Progress: Unable to calculate (total steps not set)" >&2
+                # Try to reload total steps from state file if it's not set
+                if [[ -n "$WORKFLOW_CURRENT_ID" && -f "$WORKFLOW_STATE_DIR/${WORKFLOW_CURRENT_ID}.state" ]]; then
+                    local state_total_steps
+                    state_total_steps=$(grep "^total_steps=" "$WORKFLOW_STATE_DIR/${WORKFLOW_CURRENT_ID}.state" | cut -d= -f2)
+                    if [[ -n "$state_total_steps" && "$state_total_steps" -gt 0 ]]; then
+                        WORKFLOW_TOTAL_STEPS="$state_total_steps"
+                        local progress_percent=$((step_number * 100 / WORKFLOW_TOTAL_STEPS))
+                        echo "   Progress: $progress_percent% [$(printf '%*s' $((step_number * 20 / WORKFLOW_TOTAL_STEPS)) '' | tr ' ' '▓')$(printf '%*s' $((20 - step_number * 20 / WORKFLOW_TOTAL_STEPS)) '' | tr ' ' '░')]" >&2
+                    else
+                        echo "   Progress: Unable to calculate (total steps not set)" >&2
+                    fi
+                else
+                    echo "   Progress: Unable to calculate (total steps not set)" >&2
+                fi
             fi
             ;;
         "failed")

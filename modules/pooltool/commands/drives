@@ -419,7 +419,13 @@ function drives::select {
     local selected_info=""
     
     while [[ -z "$selected_device" ]]; do
-        read -p "Select drive: " user_input
+        if [ -t 0 ]; then
+            # Interactive mode - use /dev/tty for prompts
+            read -p "Select drive: " user_input </dev/tty
+        else
+            # Automation mode - use stdin
+            read -p "Select drive: " user_input
+        fi
         
         if [[ "$user_input" == "q" || "$user_input" == "quit" ]]; then
             echo "Selection cancelled"
@@ -490,7 +496,13 @@ function drives::select {
                             else
                                 echo "⚠️  Drive at position $position ($mount_name) is unallocated and has no active device path"
                                 echo "💡 This drive would need to be allocated to SnapRAID before use"
-                                read -p "Select this unallocated drive anyway? (yes/no) [yes]: " confirm </dev/tty
+                                if [ -t 0 ]; then
+                                    # Interactive mode - use /dev/tty for prompts
+                                    read -p "Select this unallocated drive anyway? (yes/no) [yes]: " confirm </dev/tty
+                                else
+                                    # Automation mode - use stdin
+                                    read -p "Select this unallocated drive anyway? (yes/no) [yes]: " confirm
+                                fi
                                 confirm=${confirm:-yes}
                                 if [[ "$confirm" =~ ^[Yy] ]]; then
                                     # For unallocated drives, we'll use a placeholder that indicates the issue
@@ -587,7 +599,13 @@ function drives::select {
                             echo "🔧 This appears to be a new, unallocated drive that's not yet configured for SnapRAID."
                             echo "💡 Selecting this drive will allow you to configure it for your storage pool."
                             echo ""
-                            read -p "Select this unallocated drive for configuration? (yes/no): " confirm
+                            if [ -t 0 ]; then
+                                # Interactive mode - use /dev/tty for prompts
+                                read -p "Select this unallocated drive for configuration? (yes/no): " confirm </dev/tty
+                            else
+                                # Automation mode - use stdin
+                                read -p "Select this unallocated drive for configuration? (yes/no): " confirm
+                            fi
                             
                             if [[ "$confirm" =~ ^[Yy] ]]; then
                                 # Create a placeholder device path for unallocated drives

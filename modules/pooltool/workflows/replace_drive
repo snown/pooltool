@@ -307,19 +307,27 @@ replace_workflow_upgrade() {
             echo "💡 Select your target drive from the visual layout"
             echo ""
             
-            # Call the visual drive selector interactively
-            pooltool::commands::drives select
+            # Call the visual drive selector and capture only the final result line
+            local visual_output
+            visual_output=$(pooltool::commands::drives select)
             local selector_exit_code=$?
             
-            if [[ $selector_exit_code -eq 0 ]]; then
+            if [[ $selector_exit_code -eq 0 && -n "$visual_output" ]]; then
+                # Extract only the last line (the actual result)
+                local visual_selection
+                visual_selection=$(echo "$visual_output" | tail -n 1)
+                
                 echo ""
                 echo "✅ Drive selected from visual interface"
-                read -p "Enter the device path from your selection: " user_input </dev/tty
-                if [[ -n "$user_input" && "$user_input" != "q" ]]; then
-                    echo "✅ Using selected device: $user_input"
+                
+                # Handle different output formats from visual selector
+                if [[ "$visual_selection" =~ ^UNALLOCATED: ]]; then
+                    echo "💡 Selected unallocated drive: $visual_selection"
+                    echo "🔄 This drive will need to be allocated during the workflow"
+                    user_input="$visual_selection"
                 else
-                    echo "❌ No device specified"
-                    continue
+                    echo "✅ Using selected device: $visual_selection"
+                    user_input="$visual_selection"
                 fi
             else
                 echo "❌ Visual selection cancelled or failed"
@@ -338,7 +346,21 @@ replace_workflow_upgrade() {
             fi
         fi
         
-        # Validate input
+        # Handle unallocated drive selection from visual selector
+        if [[ "$user_input" =~ ^UNALLOCATED: ]]; then
+            echo "💡 Processing unallocated drive selection: $user_input"
+            # Extract components: UNALLOCATED:NAME:POSITION
+            local drive_name=$(echo "$user_input" | cut -d: -f2)
+            local drive_position=$(echo "$user_input" | cut -d: -f3)
+            
+            echo "🔄 Unallocated drive workflow not yet implemented"
+            echo "   Drive: $drive_name at position $drive_position"
+            echo "   This feature requires drive allocation logic"
+            echo "❌ Please select an allocated drive for now"
+            continue
+        fi
+        
+        # Validate input (for regular device paths)
         if [[ ! -b "$user_input" ]]; then
             echo "❌ $user_input is not a valid block device"
             continue
@@ -1650,9 +1672,9 @@ replace_upgrade_step_new_drive_prep() {
     fi
     
     # Display drive information
-    local target_size_human=$(lsblk -hno SIZE "$REPLACE_NEW_DEVICE" | head -1)
-    local target_model=$(lsblk -no MODEL "$REPLACE_NEW_DEVICE" | head -1 | xargs)
-    local source_size_human=$(lsblk -hno SIZE "$REPLACE_TARGET_DEVICE" | head -1)
+    local target_size_human=$(lsblk -dno SIZE "$REPLACE_NEW_DEVICE" | head -1)
+    local target_model=$(lsblk -dno MODEL "$REPLACE_NEW_DEVICE" | head -1 | xargs)
+    local source_size_human=$(lsblk -dno SIZE "$REPLACE_TARGET_DEVICE" | head -1)
     
     echo "✅ Target drive confirmed:"
     echo "   Device: $REPLACE_NEW_DEVICE"

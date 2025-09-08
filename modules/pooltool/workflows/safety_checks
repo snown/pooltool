@@ -219,7 +219,8 @@ safety_check_system_access() {
     fi
     
     # Check drive mapping availability
-    if ! get_unified_device_mapping >/dev/null 2>&1; then
+    bootstrap_load_module pooltool/driveutils >/dev/null 2>&1
+    if ! pooltool::create_unified_mapping 1 >/dev/null 2>&1; then
         echo "Cannot access drive mapping"
         return $SAFETY_CHECK_FAIL
     fi
@@ -403,8 +404,9 @@ get_drive_info_by_position() {
     local position="$1"
     
     # Use existing drive mapping system
+    bootstrap_load_module pooltool/driveutils >/dev/null 2>&1
     local device_mapping
-    device_mapping=$(get_unified_device_mapping)
+    device_mapping=$(pooltool::create_unified_mapping 1)
     
     # Calculate connector and device from position
     local connector=$(( (position - 1) / 4 ))
