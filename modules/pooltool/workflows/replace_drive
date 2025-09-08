@@ -154,6 +154,253 @@ replace_workflow_upgrade() {
     echo "better drive with direct data copy."
     echo ""
     
+    # Pre-workflow step: Get target drive information before starting workflow
+    echo "🔍 STEP 0: Upgrade Planning"
+    echo "─────────────────────────────────────────────────────────────────────"
+    echo "Before we begin, let's identify both the source and target drives."
+    echo ""
+    
+    # Get source drive info first
+    local source_device
+    
+    # Use the same logic as health command to map position to device
+    # This maps position to the actual device path
+    local health_result
+    health_result=$(cd /media/tRAID/local/src/pooltool && ./pooltool.sh health "$target_position" 2>/dev/null | grep "Device:" | awk '{print $2}')
+    source_device="$health_result"
+    
+    if [[ -z "$source_device" || ! -b "$source_device" ]]; then
+        echo "❌ Cannot find source drive at position $target_position"
+        echo "💡 Please check that position $target_position exists and is accessible"
+        return 1
+    fi
+    
+    local source_size_human=$(lsblk -no SIZE "$source_device" | head -1 | xargs)
+    local source_size_bytes=$(lsblk -bno SIZE "$source_device" | head -1 | xargs)
+    local source_model=$(lsblk -no MODEL "$source_device" | head -1 | xargs)
+    
+    echo "📋 Source Drive (Position $target_position):"
+    echo "   Device: $source_device"
+    echo "   Size: ${source_size_human:-"Unknown"}"
+    echo "   Model: ${source_model:-"Unknown"}"
+    echo ""
+    
+    # Now get target drive selection
+    echo "💽 Available drives for upgrade:"
+    echo ""
+    
+    # Show available drives (excluding current SnapRAID drives)
+    local snapraid_volumes=( $(snapraid::devices volumes) )
+    local available_drives=()
+    
+    # Get all block devices
+    while IFS= read -r drive; do
+        # Skip if it's already in SnapRAID array
+        local skip=false
+        for snapraid_volume in "${snapraid_volumes[@]}"; do
+            if [[ "$drive" == "$snapraid_volume" ]]; then
+                skip=true
+                break
+            fi
+        done
+        
+        if [[ "$skip" == false && "$drive" != "$source_device" ]]; then
+            available_drives+=("$drive")
+        fi
+    done < <(lsblk -plno NAME,TYPE | awk '$2=="disk" {print $1}')
+    
+    if [[ ${#available_drives[@]} -eq 0 ]]; then
+        echo "❌ No available drives found for upgrade"
+        echo "💡 Please connect your new drive and try again"
+        return 1
+    fi
+    
+    # Show available drives with sizes and better formatting
+    echo "Available drives for upgrade:"
+    echo ""
+    printf "  %-4s %-12s %-10s %-25s %-15s %s\n" "NUM" "DEVICE" "SIZE" "MODEL" "STATUS" "RECOMMENDATION"
+    printf "  %-4s %-12s %-10s %-25s %-15s %s\n" "---" "------------" "----------" "-------------------------" "---------------" "--------------"
+    
+    local drive_index=1
+    local recommended_drive=""
+    local largest_size=0
+    
+    for drive in "${available_drives[@]}"; do
+        local size_human=$(lsblk -no SIZE "$drive" | head -1 | xargs)
+        local size_bytes=$(lsblk -bno SIZE "$drive" | head -1 | xargs)
+        local model=$(lsblk -no MODEL "$drive" | head -1 | xargs)
+        
+        # Check if drive is large enough
+        local size_status="✅ Compatible"
+        local recommendation=""
+        if [[ $size_bytes -lt $source_size_bytes ]]; then
+            size_status="❌ Too Small"
+            recommendation="Not suitable"
+        else
+            # Find the largest compatible drive for recommendation
+            if [[ $size_bytes -gt $largest_size ]]; then
+                largest_size=$size_bytes
+                recommended_drive="$drive"
+                recommendation="⭐ Recommended"
+            else
+                recommendation="Good option"
+            fi
+        fi
+        
+        printf "  %-4s %-12s %-10s %-25s %-15s %s\n" "$drive_index" "$drive" "$size_human" "${model:-"Unknown"}" "$size_status" "$recommendation"
+        ((drive_index++))
+    done
+    
+    echo ""
+    echo "💡 Options:"
+    echo "   • Enter a device path (e.g., /dev/sdw)"
+    echo "   • Enter a number from the list above"
+    echo "   • Type 'visual' to use the visual drive selector"
+    echo "   • Type 'q' to quit"
+    echo ""
+    
+    # Provide default recommendation
+    if [[ -n "$recommended_drive" ]]; then
+        echo "🎯 Recommended: $recommended_drive (largest compatible drive)"
+    fi
+    
+    # Get new drive selection with better validation and options
+    local target_device=""
+    while [[ -z "$target_device" ]]; do
+        local default_prompt=""
+        if [[ -n "$recommended_drive" ]]; then
+            default_prompt=" [default: $recommended_drive]"
+        fi
+        
+        read -p "Select target drive${default_prompt}: " user_input
+        
+        # Handle empty input (use default)
+        if [[ -z "$user_input" && -n "$recommended_drive" ]]; then
+            user_input="$recommended_drive"
+        fi
+        
+        if [[ "$user_input" == "q" || "$user_input" == "quit" ]]; then
+            echo "❌ Upgrade cancelled by user"
+            return 1
+        fi
+        
+        # Handle visual selector
+        if [[ "$user_input" == "visual" ]]; then
+            echo "🎯 Opening visual drive selector..."
+            echo "💡 Select your target drive from the visual layout"
+            echo ""
+            
+            # Call the visual drive selector
+            selected_result=$(pooltool::commands::drives select 2>/dev/null)
+            local selector_exit_code=$?
+            
+            if [[ $selector_exit_code -eq 0 && -n "$selected_result" ]]; then
+                # Parse the result - could be direct device path or UNALLOCATED format
+                if [[ "$selected_result" =~ ^UNALLOCATED: ]]; then
+                    echo "⚠️  You selected an unallocated drive: $selected_result"
+                    echo "💡 Unallocated drives can be used as upgrade targets"
+                    read -p "Continue with this unallocated drive? (yes/no) [yes]: " confirm </dev/tty
+                    confirm=${confirm:-yes}
+                    if [[ ! "$confirm" =~ ^[Yy] ]]; then
+                        echo "Selection cancelled"
+                        continue
+                    fi
+                    # For workflow purposes, we'll need to handle unallocated drives
+                    echo "📝 Note: Unallocated drive selected for upgrade target"
+                    user_input="UNALLOCATED_DRIVE"
+                elif [[ "$selected_result" =~ ^/dev/ ]]; then
+                    # Direct device path selected
+                    user_input="$selected_result"
+                    echo "✅ Selected device: $user_input"
+                else
+                    # Parse other formats if needed
+                    echo "📝 Selected: $selected_result"
+                    # For now, let's just use the result as-is and let the downstream validation handle it
+                    user_input="$selected_result"
+                    echo "✅ Processing selection: $user_input"
+                fi
+            else
+                echo "❌ Visual selection cancelled or failed"
+                continue
+            fi
+        fi
+        
+        # Handle numeric selection
+        if [[ "$user_input" =~ ^[0-9]+$ ]]; then
+            local selected_index=$user_input
+            if [[ $selected_index -ge 1 && $selected_index -le ${#available_drives[@]} ]]; then
+                user_input="${available_drives[$((selected_index-1))]}"
+            else
+                echo "❌ Invalid selection. Please choose a number between 1 and ${#available_drives[@]}"
+                continue
+            fi
+        fi
+        
+        # Validate input
+        if [[ ! -b "$user_input" ]]; then
+            echo "❌ $user_input is not a valid block device"
+            continue
+        fi
+        
+        # Check if it's in available drives
+        local found=false
+        for drive in "${available_drives[@]}"; do
+            if [[ "$drive" == "$user_input" ]]; then
+                found=true
+                break
+            fi
+        done
+        
+        if [[ "$found" == false ]]; then
+            echo "❌ Drive $user_input is not available for upgrade (may be in use)"
+            continue
+        fi
+        
+        # Check size compatibility
+        local new_size=$(lsblk -bno SIZE "$user_input" | head -1)
+        if [[ $new_size -lt $source_size_bytes ]]; then
+            echo "❌ Target drive is smaller than source drive"
+            echo "   Source: $source_size_human"
+            echo "   Target: $(lsblk -no SIZE "$user_input" | head -1)"
+            echo ""
+            read -p "Continue anyway? (NOT RECOMMENDED) [y/N]: " confirm
+            if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+                continue
+            fi
+        fi
+        
+        target_device="$user_input"
+    done
+    
+    # Show upgrade summary and get final confirmation
+    echo ""
+    echo "📋 UPGRADE SUMMARY"
+    echo "─────────────────────────────────────────────────────────────────────"
+    echo "Source Drive: $source_device ($source_size_human) - Position $target_position"
+    echo "Target Drive: $target_device ($(lsblk -no SIZE "$target_device" | head -1 | xargs))"
+    echo ""
+    echo "This will:"
+    echo "1. Safely copy all data from source to target drive"
+    echo "2. Update SnapRAID configuration"
+    echo "3. Replace the source drive in the array"
+    echo "4. Keep the source drive as backup"
+    echo ""
+    
+    read -p "Ready to start the upgrade workflow? [y/N]: " confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        echo "❌ Upgrade cancelled by user"
+        return 1
+    fi
+    
+    # Store the target device globally for the workflow
+    REPLACE_NEW_DEVICE="$target_device"
+    REPLACE_TARGET_DEVICE="$source_device"
+    REPLACE_TARGET_POSITION="$target_position"
+    
+    echo ""
+    echo "🚀 Starting upgrade workflow..."
+    echo ""
+    
     # Start workflow with 7 steps for upgrade
     local workflow_id
     workflow_id=$(workflow_start "drive_upgrade" 7)
@@ -1386,134 +1633,53 @@ replace_upgrade_step_source_assessment() {
 }
 
 #
-# Upgrade Step 2: Prepare new drive and validate compatibility
+# Upgrade Step 2: Validate new drive preparation
 #
 replace_upgrade_step_new_drive_prep() {
     echo ""
-    echo "💽 Step 2: New Drive Preparation"
+    echo "💽 Step 2: New Drive Validation"
     echo "─────────────────────────────────────────────────────────────────────"
     
-    echo "📋 New Drive Requirements:"
-    echo "• Must be same size or larger than source drive"
-    echo "• Should be connected and accessible before proceeding"
-    echo "• Will be partitioned and formatted during this process"
-    echo ""
-    
-    # Get source drive size for comparison
-    local source_size=""
-    if [[ -b "$REPLACE_TARGET_DEVICE" ]]; then
-        source_size=$(lsblk -bno SIZE "$REPLACE_TARGET_DEVICE" | head -1)
-        local source_size_human=$(lsblk -hno SIZE "$REPLACE_TARGET_DEVICE" | head -1)
-        echo "📏 Source drive size: $source_size_human"
-    fi
-    
-    echo ""
-    echo "🔍 Available drives for upgrade:"
-    
-    # Show available drives (excluding current SnapRAID drives)
-    local snapraid_volumes=( $(snapraid::devices volumes) )
-    local available_drives=()
-    
-    # Get all block devices
-    while IFS= read -r drive; do
-        # Skip if it's already in SnapRAID array
-        local skip=false
-        for snapraid_volume in "${snapraid_volumes[@]}"; do
-            if [[ "$drive" == "$snapraid_volume" ]]; then
-                skip=true
-                break
-            fi
-        done
-        
-        if [[ "$skip" == false && "$drive" != "$REPLACE_TARGET_DEVICE" ]]; then
-            available_drives+=("$drive")
-        fi
-    done < <(lsblk -plno NAME,TYPE | awk '$2=="disk" {print $1}')
-    
-    if [[ ${#available_drives[@]} -eq 0 ]]; then
-        echo "❌ No available drives found for upgrade"
-        echo "💡 Please connect your new drive and try again"
+    # Verify the target drive is still available and accessible
+    if [[ ! -b "$REPLACE_NEW_DEVICE" ]]; then
+        echo "❌ Target drive $REPLACE_NEW_DEVICE is no longer accessible"
+        echo "💡 Please ensure the drive is properly connected"
         return 1
     fi
     
-    # Show available drives with sizes
-    echo "Available drives:"
-    for drive in "${available_drives[@]}"; do
-        local size_human=$(lsblk -hno SIZE "$drive" | head -1)
-        local size_bytes=$(lsblk -bno SIZE "$drive" | head -1)
-        local model=$(lsblk -no MODEL "$drive" | head -1 | xargs)
-        
-        # Check if drive is large enough
-        local size_status="✅"
-        if [[ -n "$source_size" && $size_bytes -lt $source_size ]]; then
-            size_status="❌ TOO SMALL"
-        fi
-        
-        printf "  %-12s %-8s %-20s %s\n" "$drive" "$size_human" "$model" "$size_status"
-    done
+    # Display drive information
+    local target_size_human=$(lsblk -hno SIZE "$REPLACE_NEW_DEVICE" | head -1)
+    local target_model=$(lsblk -no MODEL "$REPLACE_NEW_DEVICE" | head -1 | xargs)
+    local source_size_human=$(lsblk -hno SIZE "$REPLACE_TARGET_DEVICE" | head -1)
     
+    echo "✅ Target drive confirmed:"
+    echo "   Device: $REPLACE_NEW_DEVICE"
+    echo "   Size: $target_size_human"
+    echo "   Model: $target_model"
     echo ""
     
-    # Get new drive selection
-    local new_drive=""
-    while [[ -z "$new_drive" ]]; do
-        local user_input
-        user_input=$(bashful input -p "Enter the new drive device path (e.g., /dev/sdi): " -d "")
+    echo "� Source drive:"
+    echo "   Device: $REPLACE_TARGET_DEVICE"
+    echo "   Size: $source_size_human"
+    echo ""
+    
+    # Check if target drive has any existing data/partitions
+    local partition_count=$(lsblk -no NAME "$REPLACE_NEW_DEVICE" | wc -l)
+    if [[ $partition_count -gt 1 ]]; then
+        echo "⚠️  Target drive has existing partitions:"
+        lsblk "$REPLACE_NEW_DEVICE"
+        echo ""
+        echo "🚨 WARNING: All data on the target drive will be destroyed!"
+        echo ""
         
-        if [[ "$user_input" == "q" || "$user_input" == "quit" ]]; then
-            echo "❌ New drive selection cancelled"
+        read -p "Continue with upgrade (this will ERASE the target drive)? [y/N]: " confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            echo "❌ Upgrade cancelled by user"
             return 1
         fi
-        
-        # Validate input
-        if [[ ! -b "$user_input" ]]; then
-            echo "❌ $user_input is not a valid block device"
-            continue
-        fi
-        
-        # Check if it's in available drives
-        local found=false
-        for drive in "${available_drives[@]}"; do
-            if [[ "$drive" == "$user_input" ]]; then
-                found=true
-                break
-            fi
-        done
-        
-        if [[ "$found" == false ]]; then
-            echo "❌ Drive $user_input is not available for upgrade (may be in use)"
-            continue
-        fi
-        
-        # Check size compatibility
-        if [[ -n "$source_size" ]]; then
-            local new_size=$(lsblk -bno SIZE "$user_input" | head -1)
-            if [[ $new_size -lt $source_size ]]; then
-                echo "❌ New drive is smaller than source drive"
-                echo "   Source: $(lsblk -hno SIZE "$REPLACE_TARGET_DEVICE" | head -1)"
-                echo "   New: $(lsblk -hno SIZE "$user_input" | head -1)"
-                
-                if ! pooltool::question -p "Continue anyway? (NOT RECOMMENDED)" -d "n"; then
-                    continue
-                fi
-            fi
-        fi
-        
-        new_drive="$user_input"
-    done
+    fi
     
-    # Store new drive information
-    REPLACE_NEW_DEVICE="$new_drive"
-    REPLACE_NEW_SIZE=$(lsblk -hno SIZE "$new_drive" | head -1)
-    REPLACE_NEW_MODEL=$(lsblk -no MODEL "$new_drive" | head -1 | xargs)
-    
-    echo ""
-    echo "✅ New drive selected: $new_drive"
-    echo "   Model: $REPLACE_NEW_MODEL"
-    echo "   Size: $REPLACE_NEW_SIZE"
-    echo ""
-    echo "📝 Ready for compatibility verification"
-    
+    echo "✅ Target drive validation completed"
     return 0
 }
 
