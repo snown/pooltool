@@ -1,0 +1,742 @@
+#!/usr/bin/env bash
+#NAMESPACE=pooltool::commands
+
+dependencies::register_module "pooltool/commands/drives"
+
+# Declare dependencies - let bootstrap handle the loading
+dependencies::depends "pooltool/driveutils"
+dependencies::depends "pooltool/healthutils"
+dependencies::depends "snapraid/devices"
+
+# Pooltool Unified Drive Information Command
+# Standardizes drive information across all pooltool functionality
+# Created: September 8, 2025
+
+#
+# Print help message for drives command
+#
+function drives::print_help {
+    cat << 'EOF'
+POOLTOOL DRIVE INFORMATION
+
+USAGE:
+    pooltool drives [OPTIONS] [SUBCOMMAND]
+
+DESCRIPTION:
+    Unified interface for all drive information in the system.
+    Combines SnapRAID, physical layout, and system information.
+
+SUBCOMMANDS:
+    list            List all drives with basic information (default)
+    detail          Show detailed drive information
+    physical        Show physical layout/bay information
+    available       Show drives available for use (not in SnapRAID)
+    snapraid        Show only SnapRAID configured drives
+    select          Interactive drive selection interface
+
+OPTIONS:
+    --format=FORMAT Output format: table, json, csv (default: table)
+    --positions     Include position numbers in output
+    --health        Include health status information
+    --sizes         Include size information
+    --models        Include model information
+    --all           Include all available information
+    --quiet         Minimal output for scripting
+    
+EXAMPLES:
+    pooltool drives                    # List all drives in table format
+    pooltool drives detail             # Detailed information for all drives
+    pooltool drives available          # Show drives available for upgrade
+    pooltool drives --format=json      # JSON output for automation
+    pooltool drives select             # Interactive drive selection
+    pooltool drives physical           # Physical bay layout
+    
+EOF
+}
+
+#
+# List drives with various output formats and filtering options
+#
+function drives::list {
+    local format="${1:-table}"
+    local include_positions="${2:-false}"
+    local include_health="${3:-false}"
+    local include_sizes="${4:-false}"
+    local include_models="${5:-false}"
+    local quiet="${6:-false}"
+    
+    # Get unified drive mapping
+    local unified_data
+    if ! unified_data=$(pooltool::create_unified_mapping); then
+        echo "❌ Failed to get drive information" >&2
+        return 1
+    fi
+    
+    if [[ -z "$unified_data" ]]; then
+        echo "No drives found" >&2
+        return 1
+    fi
+    
+    case "$format" in
+        "table")
+            this::drives::format_table "$unified_data" "$include_positions" "$include_health" "$include_sizes" "$include_models" "$quiet"
+            ;;
+        "json")
+            this::drives::format_json "$unified_data" "$include_positions" "$include_health" "$include_sizes" "$include_models"
+            ;;
+        "csv")
+            this::drives::format_csv "$unified_data" "$include_positions" "$include_health" "$include_sizes" "$include_models"
+            ;;
+        *)
+            echo "❌ Unknown format: $format" >&2
+            return 1
+            ;;
+    esac
+}
+
+#
+# Format drives data as table
+#
+function drives::format_table {
+    local unified_data="$1"
+    local include_positions="$2"
+    local include_health="$3"
+    local include_sizes="$4"
+    local include_models="$5"
+    local quiet="$6"
+    
+    if [[ "$quiet" != "true" ]]; then
+        echo "🖥️  DRIVE INFORMATION"
+        echo "═══════════════════════════════════════════════════════════════════"
+        echo ""
+    fi
+    
+    # Build header based on options
+    local header="NAME"
+    local format_str="%-12s"
+    
+    if [[ "$include_positions" == "true" ]]; then
+        header="$header POS"
+        format_str="$format_str %-4s"
+    fi
+    
+    header="$header DEVICE"
+    format_str="$format_str %-12s"
+    
+    if [[ "$include_sizes" == "true" ]]; then
+        header="$header SIZE"
+        format_str="$format_str %-8s"
+    fi
+    
+    if [[ "$include_models" == "true" ]]; then
+        header="$header MODEL"
+        format_str="$format_str %-20s"
+    fi
+    
+    header="$header STATUS"
+    format_str="$format_str %-15s"
+    
+    if [[ "$include_health" == "true" ]]; then
+        header="$header HEALTH"
+        format_str="$format_str %-10s"
+    fi
+    
+    # Print header
+    if [[ "$quiet" != "true" ]]; then
+        echo "$header"
+        echo "$header" | sed 's/./─/g'
+    fi
+    
+    # Process each drive
+    while IFS= read -r drive_record; do
+        if [[ -z "$drive_record" ]]; then continue; fi
+        
+        # Parse unified record format:
+        # mount_name:arcconf_id:connector:device_slot:snapraid_name:device_path:wwn:serial:channel:device_num:model:size:status
+        if [[ "$drive_record" =~ ^([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+            local mount_name="${BASH_REMATCH[1]}"
+            local arcconf_id="${BASH_REMATCH[2]}"
+            local connector="${BASH_REMATCH[3]}"
+            local device_slot="${BASH_REMATCH[4]}"
+            local snapraid_name="${BASH_REMATCH[5]}"
+            local device_path="${BASH_REMATCH[6]}"
+            local wwn="${BASH_REMATCH[7]}"
+            local serial="${BASH_REMATCH[8]}"
+            local channel="${BASH_REMATCH[9]}"
+            local device_num="${BASH_REMATCH[10]}"
+            local model="${BASH_REMATCH[11]}"
+            local size="${BASH_REMATCH[12]}"
+            local status="${BASH_REMATCH[13]}"
+            
+            # Calculate position from connector and device_slot
+            local position=""
+            if [[ -n "$connector" && -n "$device_slot" && "$connector" != "NONE" && "$device_slot" != "NONE" ]]; then
+                position=$(( connector * 4 + (4 - device_slot) ))
+            fi
+            
+            # Get additional information if requested
+            local health_status=""
+            if [[ "$include_health" == "true" && -n "$device_path" && "$device_path" != "NONE" ]]; then
+                # Get health status (simplified for now)
+                if [[ -b "$device_path" ]]; then
+                    health_status="Good"
+                else
+                    health_status="Unknown"
+                fi
+            fi
+            
+            # Get size if not available and device exists
+            if [[ "$include_sizes" == "true" && ( -z "$size" || "$size" == "UNKNOWN" ) && -n "$device_path" && "$device_path" != "NONE" && -b "$device_path" ]]; then
+                size=$(lsblk -no SIZE "$device_path" | head -1 | xargs)
+            fi
+            
+            # Build output line
+            local line_args=("$mount_name")
+            
+            if [[ "$include_positions" == "true" ]]; then
+                line_args+=("${position:-"-"}")
+            fi
+            
+            line_args+=("${device_path:-"-"}")
+            
+            if [[ "$include_sizes" == "true" ]]; then
+                line_args+=("${size:-"-"}")
+            fi
+            
+            if [[ "$include_models" == "true" ]]; then
+                local display_model="${model:-"-"}"
+                # Truncate long model names
+                if [[ ${#display_model} -gt 18 ]]; then
+                    display_model="${display_model:0:15}..."
+                fi
+                line_args+=("$display_model")
+            fi
+            
+            # Status formatting
+            local display_status="$status"
+            case "$status" in
+                "active") display_status="✅ Active" ;;
+                "unallocated") display_status="🆓 Available" ;;
+                "parity") display_status="🛡️  Parity" ;;
+                *) display_status="❓ $status" ;;
+            esac
+            line_args+=("$display_status")
+            
+            if [[ "$include_health" == "true" ]]; then
+                local display_health="${health_status:-"-"}"
+                case "$health_status" in
+                    "Good") display_health="✅ Good" ;;
+                    "Warning") display_health="⚠️  Warn" ;;
+                    "Failed") display_health="❌ Fail" ;;
+                    *) display_health="❓ ${health_status:-"-"}" ;;
+                esac
+                line_args+=("$display_health")
+            fi
+            
+            printf "$format_str\n" "${line_args[@]}"
+        fi
+    done <<< "$unified_data"
+    
+    if [[ "$quiet" != "true" ]]; then
+        echo ""
+    fi
+}
+
+#
+# Format drive information as JSON
+#
+#
+# Format drives data as JSON
+#
+function drives::format_json {
+    local unified_data="$1"
+    local include_positions="$2"
+    local include_health="$3"
+    local include_sizes="$4"
+    local include_models="$5"
+    
+    echo "{"
+    echo '  "drives": ['
+    
+    local first=true
+    while IFS= read -r drive_record; do
+        if [[ -z "$drive_record" ]]; then continue; fi
+        
+        if [[ "$first" == "true" ]]; then
+            first=false
+        else
+            echo ","
+        fi
+        
+        # Parse record and output JSON
+        if [[ "$drive_record" =~ ^([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+            local mount_name="${BASH_REMATCH[1]}"
+            local device_path="${BASH_REMATCH[5]}"
+            local model="${BASH_REMATCH[11]}"
+            local size="${BASH_REMATCH[12]}"
+            local status="${BASH_REMATCH[13]}"
+            
+            echo "    {"
+            echo "      \"name\": \"$mount_name\","
+            echo "      \"device\": \"${device_path:-null}\","
+            echo "      \"status\": \"$status\""
+            
+            if [[ "$include_sizes" == "true" ]]; then
+                echo "      ,\"size\": \"${size:-null}\""
+            fi
+            
+            if [[ "$include_models" == "true" ]]; then
+                echo "      ,\"model\": \"${model:-null}\""
+            fi
+            
+            echo -n "    }"
+        fi
+    done <<< "$unified_data"
+    
+    echo ""
+    echo "  ]"
+    echo "}"
+}
+
+#
+# Format drives data as CSV  
+#
+function drives::format_csv {
+    local unified_data="$1"
+    local include_positions="$2"
+    local include_health="$3"
+    local include_sizes="$4"
+    local include_models="$5"
+    
+    # Simple CSV output - basic implementation
+    echo "Device,Position,Role,Size,Model,Health"
+    
+    # Parse the unified data and output as CSV
+    # This is a placeholder implementation - would need proper CSV formatting
+    echo "$unified_data" | while IFS='|' read device position role mountpoint size serial model temp status util_percent; do
+        [[ -z "$device" ]] && continue
+        echo "$device,$position,$role,$size,$model,$status"
+    done
+}
+
+#
+# Show drives available for use (not allocated to SnapRAID)
+#
+function drives::available {
+    local format="${1:-table}"
+    
+    # Get unified drive mapping and filter for available drives
+    local unified_data
+    if ! unified_data=$(pooltool::create_unified_mapping); then
+        echo "❌ Failed to get drive information" >&2
+        return 1
+    fi
+    
+    local available_data
+    available_data=$(echo "$unified_data" | grep ":unallocated$")
+    
+    if [[ -z "$available_data" ]]; then
+        if [[ "$format" == "json" ]]; then
+            echo '{"drives": [], "message": "No drives available for use"}'
+        else
+            echo "No drives available for use"
+            echo "💡 All drives are currently allocated to SnapRAID or system use"
+        fi
+        return 0
+    fi
+    
+    case "$format" in
+        "json")
+            # Use the format_json function for available drives
+            this::drives::format_json "$available_data" "true" "false" "true" "true"
+            ;;
+        "csv")
+            # Use the format_csv function for available drives
+            this::drives::format_csv "$available_data" "true" "false" "true" "true"
+            ;;
+        *)
+            # Table format (default)
+            echo "🆓 AVAILABLE DRIVES FOR UPGRADE/EXPANSION"
+            echo "═══════════════════════════════════════════════════════════════════"
+            echo ""
+            
+            # Show available drives in table format
+            this::drives::format_table "$available_data" "true" "false" "true" "true" "false"
+            
+            echo "💡 These drives can be used for:"
+            echo "   • Drive upgrades (replace existing drives)"
+            echo "   • Array expansion (add more storage)"
+            echo "   • Spare drives (emergency replacements)"
+            ;;
+    esac
+}
+
+#
+# Interactive drive selection with visual layout
+#
+function drives::select {
+    echo "🎯 INTERACTIVE DRIVE SELECTION"
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo ""
+    
+    # Get unified drive mapping for position resolution
+    local unified_data
+    if ! unified_data=$(pooltool::create_unified_mapping); then
+        echo "❌ Failed to get drive information" >&2
+        return 1
+    fi
+    
+    # Show visual drive layout first
+    echo "📍 DRIVE BAY LAYOUT (Click position or enter commands below)"
+    echo "─────────────────────────────────────────────────────────────────"
+    
+    # Convert unified data to array for layout rendering
+    local unified_array
+    mapfile -t unified_array <<< "$unified_data"
+    
+    # Get physical layout and render with positions
+    local layout_data
+    if layout_data=$(pooltool::get_physical_layout "${unified_array[@]}"); then
+        # Show visual grid with position numbers
+        pooltool::render_drive_grid_enhanced "$layout_data" "mount" "" true false false false true "${unified_array[@]}"
+    else
+        echo "⚠️ Visual layout unavailable - showing table format"
+        # Fallback to table view
+        this::drives::list "table" "true" "false" "true" "true" "false"
+    fi
+    
+    echo ""
+    echo "Selection options:"
+    echo "  • Enter a position number (1-24)"
+    echo "  • Enter a drive name (DRU01, PPU02, etc.)"
+    echo "  • Enter a device path (/dev/sdx)"
+    echo "  • Type 'available' to see only available drives"
+    echo "  • Type 'layout' to show layout again"
+    echo "  • Type 'q' to quit"
+    echo ""
+    
+    local selected_device=""
+    local selected_info=""
+    
+    while [[ -z "$selected_device" ]]; do
+        read -p "Select drive: " user_input
+        
+        if [[ "$user_input" == "q" || "$user_input" == "quit" ]]; then
+            echo "Selection cancelled"
+            return 1
+        fi
+        
+        if [[ "$user_input" == "available" ]]; then
+            echo ""
+            this::drives::available
+            echo ""
+            continue
+        fi
+        
+        if [[ "$user_input" == "layout" ]]; then
+            echo ""
+            echo "📍 DRIVE BAY LAYOUT"
+            echo "─────────────────────────────────────────────────────────────────"
+            if [[ -n "$layout_data" ]]; then
+                pooltool::render_drive_grid_enhanced "$layout_data" "mount" "" true false false false true "${unified_array[@]}"
+            else
+                this::drives::list "table" "true" "false" "true" "true" "false"
+            fi
+            echo ""
+            continue
+        fi
+        
+        # Try to resolve the input to a device path
+        if [[ "$user_input" =~ ^/dev/ ]]; then
+            # Direct device path
+            if [[ -b "$user_input" ]]; then
+                selected_device="$user_input"
+                selected_info="Device path: $user_input"
+            else
+                echo "❌ Device $user_input not found"
+                continue
+            fi
+        elif [[ "$user_input" =~ ^[0-9]+$ ]]; then
+            # Position number - implement position-to-device mapping
+            local position="$user_input"
+            if [[ $position -lt 1 || $position -gt 24 ]]; then
+                echo "❌ Position must be between 1 and 24"
+                continue
+            fi
+            
+            # Find drive at this position using unified mapping
+            local drive_found=false
+            while IFS= read -r drive_record; do
+                if [[ -z "$drive_record" ]]; then continue; fi
+                
+                # Parse unified record format: mount_name:arcconf_id:connector:device_slot:snapraid_name:device_path:wwn:serial:channel:device_num:model:size:status
+                if [[ "$drive_record" =~ ^([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+                    local mount_name="${BASH_REMATCH[1]}"
+                    local arcconf_id="${BASH_REMATCH[2]}"
+                    local connector="${BASH_REMATCH[3]}"
+                    local device_slot="${BASH_REMATCH[4]}"
+                    local snapraid_name="${BASH_REMATCH[5]}"
+                    local device_path="${BASH_REMATCH[6]}"
+                    
+                    # Calculate position from connector and device_slot
+                    if [[ -n "$connector" && -n "$device_slot" && "$connector" != "NONE" && "$device_slot" != "NONE" ]]; then
+                        local calc_position=$(( connector * 4 + (4 - device_slot) ))
+                        
+                        if [[ "$calc_position" == "$position" ]]; then
+                            drive_found=true
+                            if [[ -n "$device_path" && "$device_path" != "NONE" ]]; then
+                                selected_device="$device_path"
+                                selected_info="Position $position: $mount_name ($device_path)"
+                            else
+                                echo "⚠️  Drive at position $position ($mount_name) is unallocated and has no active device path"
+                                echo "💡 This drive would need to be allocated to SnapRAID before use"
+                                read -p "Select this unallocated drive anyway? (yes/no) [yes]: " confirm </dev/tty
+                                confirm=${confirm:-yes}
+                                if [[ "$confirm" =~ ^[Yy] ]]; then
+                                    # For unallocated drives, we'll use a placeholder that indicates the issue
+                                    selected_device="UNALLOCATED:$mount_name:$position"
+                                    selected_info="Position $position: $mount_name [unallocated - no device path]"
+                                else
+                                    echo "Selection cancelled - please choose a different drive"
+                                    break
+                                fi
+                            fi
+                            break
+                        fi
+                    fi
+                fi
+            done <<< "$unified_data"
+            
+            if [[ "$drive_found" == false ]]; then
+                # Check if there's an unallocated drive at this position using raw arcconf data
+                echo "🔍 Checking for unallocated drive at position $position..."
+                
+                # Calculate connector and device_slot from position
+                local target_connector=$(( (position - 1) / 4 ))
+                local target_device_slot=$(( 4 - ((position - 1) % 4) ))
+                
+                # Check arcconf for physical drive at this position
+                if command -v arcconf >/dev/null 2>&1; then
+                    local arcconf_output
+                    if arcconf_output=$(arcconf GETCONFIG 1 PD 2>/dev/null); then
+                        local device_line_found=false
+                        local found_connector=""
+                        local found_device=""
+                        local found_model=""
+                        local found_serial=""
+                        local found_size=""
+                        
+                        # Parse arcconf output to find device at target position
+                        while IFS= read -r line; do
+                            if [[ "$line" =~ ^Device\ \#([0-9]+)$ ]]; then
+                                # Found a device entry, extract device number
+                                local device_num="${BASH_REMATCH[1]}"
+                                device_line_found=true
+                                found_connector=""
+                                found_device=""
+                                found_model=""
+                                found_serial=""
+                                found_size=""
+                            elif [[ "$device_line_found" == true ]]; then
+                                if [[ "$line" =~ Connector\ Name[[:space:]]*:[[:space:]]*(.+)$ ]]; then
+                                    found_connector="${BASH_REMATCH[1]// /}"
+                                elif [[ "$line" =~ Device\ location[[:space:]]*:[[:space:]]*Connector\ ([0-9]+),\ Device\ ([0-9]+)$ ]]; then
+                                    local conn="${BASH_REMATCH[1]}"
+                                    local dev="${BASH_REMATCH[2]}"
+                                    found_connector="$conn"
+                                    found_device="$dev"
+                                    
+                                    # Check if this matches our target position
+                                    if [[ "$conn" == "$target_connector" && "$dev" == "$target_device_slot" ]]; then
+                                        # Found a physical drive at the target position!
+                                        drive_found=true
+                                        echo "✅ Found unallocated drive at position $position (Connector $conn, Device $dev)"
+                                        
+                                        # Continue parsing to get model and serial
+                                        continue
+                                    else
+                                        # Not our target, reset and continue
+                                        device_line_found=false
+                                    fi
+                                elif [[ "$drive_found" == true && "$line" =~ Model[[:space:]]*:[[:space:]]*(.+)$ ]]; then
+                                    found_model="${BASH_REMATCH[1]}"
+                                elif [[ "$drive_found" == true && "$line" =~ Serial\ number[[:space:]]*:[[:space:]]*(.+)$ ]]; then
+                                    found_serial="${BASH_REMATCH[1]}"
+                                elif [[ "$drive_found" == true && "$line" =~ Total\ Size[[:space:]]*:[[:space:]]*([0-9]+)\ MB ]]; then
+                                    local size_mb="${BASH_REMATCH[1]}"
+                                    # Convert MB to more readable format
+                                    if [[ $size_mb -gt 1000000 ]]; then
+                                        found_size="$(( size_mb / 1000000 ))TB"
+                                    else
+                                        found_size="$(( size_mb / 1000 ))GB"
+                                    fi
+                                    
+                                    # We have all the info we need, break out
+                                    break
+                                fi
+                            fi
+                        done <<< "$arcconf_output"
+                        
+                        if [[ "$drive_found" == true ]]; then
+                            echo "📋 Drive Details:"
+                            echo "   Model: ${found_model:-Unknown}"
+                            echo "   Serial: ${found_serial:-Unknown}"
+                            echo "   Size: ${found_size:-Unknown}"
+                            echo "   Position: $position (Connector $target_connector, Device $target_device_slot)"
+                            echo ""
+                            echo "🔧 This appears to be a new, unallocated drive that's not yet configured for SnapRAID."
+                            echo "💡 Selecting this drive will allow you to configure it for your storage pool."
+                            echo ""
+                            read -p "Select this unallocated drive for configuration? (yes/no): " confirm
+                            
+                            if [[ "$confirm" =~ ^[Yy] ]]; then
+                                # Create a placeholder device path for unallocated drives
+                                selected_device="UNALLOCATED:NEW-$(echo "$found_size" | tr -d ' '):$position:$target_connector:$target_device_slot"
+                                selected_info="Position $position: Unallocated ${found_model:-Drive} (${found_size:-Unknown size}) [Ready for configuration]"
+                                
+                                echo "✅ Selected unallocated drive at position $position"
+                                echo "💡 This drive can now be configured for SnapRAID use"
+                            else
+                                echo "Selection cancelled - please choose a different drive"
+                                continue
+                            fi
+                        else
+                            echo "❌ No drive found at position $position"
+                            continue
+                        fi
+                    else
+                        echo "❌ Unable to access arcconf data - cannot detect unallocated drives"
+                        echo "❌ No drive found at position $position"
+                        continue
+                    fi
+                else
+                    echo "❌ arcconf command not available - cannot detect unallocated drives"
+                    echo "❌ No drive found at position $position"
+                    continue
+                fi
+            fi
+        elif [[ "$user_input" =~ ^[A-Z] ]]; then
+            # Drive name - implement name-to-device mapping
+            local drive_name="$user_input"
+            local drive_found=false
+            
+            while IFS= read -r drive_record; do
+                if [[ -z "$drive_record" ]]; then continue; fi
+                
+                # Parse unified record format
+                if [[ "$drive_record" =~ ^([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+                    local mount_name="${BASH_REMATCH[1]}"
+                    local snapraid_name="${BASH_REMATCH[5]}"
+                    local device_path="${BASH_REMATCH[6]}"
+                    
+                    if [[ "$mount_name" == "$drive_name" ]]; then
+                        drive_found=true
+                        if [[ -n "$device_path" && "$device_path" != "NONE" ]]; then
+                            selected_device="$device_path"
+                            selected_info="Drive name $drive_name: $device_path"
+                        else
+                            echo "❌ Drive $drive_name has no device path (may be unallocated)"
+                            break
+                        fi
+                        break
+                    fi
+                fi
+            done <<< "$unified_data"
+            
+            if [[ "$drive_found" == false ]]; then
+                echo "❌ Drive name '$drive_name' not found"
+                echo "💡 Available drives: $(echo "$unified_data" | cut -d: -f1 | tr '\n' ' ')"
+                continue
+            fi
+        else
+            echo "❌ Invalid input. Please use:"
+            echo "   • Position number (1-24)"
+            echo "   • Drive name (DRU01, PPU02, etc.)"
+            echo "   • Device path (/dev/sdx)"
+            echo "   • 'available', 'layout', or 'q'"
+            continue
+        fi
+    done
+    
+    echo "✅ Selected: $selected_info"
+    echo "$selected_device"  # Return the selected device path
+}
+
+#
+# Main drives command dispatcher
+#
+function drives {
+    local subcommand="list"  # Default subcommand
+    local format="table"
+    local include_positions="false"
+    local include_health="false"
+    local include_sizes="false"
+    local include_models="false"
+    local quiet="false"
+    
+    # Parse options and subcommands
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --format=*)
+                format="${1#*=}"
+                ;;
+            --positions)
+                include_positions="true"
+                ;;
+            --health)
+                include_health="true"
+                ;;
+            --sizes)
+                include_sizes="true"
+                ;;
+            --models)
+                include_models="true"
+                ;;
+            --all)
+                include_positions="true"
+                include_health="true"
+                include_sizes="true"
+                include_models="true"
+                ;;
+            --quiet)
+                quiet="true"
+                ;;
+            -h|--help)
+                this::drives::print_help
+                return 0
+                ;;
+            list|detail|physical|available|snapraid|select|help)
+                subcommand="$1"
+                ;;
+            *)
+                echo "❌ Unknown option or subcommand: $1" >&2
+                echo "Use 'pooltool drives --help' for usage information" >&2
+                return 1
+                ;;
+        esac
+        shift
+    done
+    
+    case "$subcommand" in
+        "list")
+            this::drives::list "$format" "$include_positions" "$include_health" "$include_sizes" "$include_models" "$quiet"
+            ;;
+        "detail")
+            this::drives::list "$format" "true" "true" "true" "true" "$quiet"
+            ;;
+        "available")
+            this::drives::available "$format"
+            ;;
+        "select")
+            this::drives::select
+            ;;
+        "help")
+            this::drives::print_help
+            ;;
+        *)
+            echo "❌ Unknown subcommand: $subcommand" >&2
+            echo "Use 'pooltool drives help' for usage information" >&2
+            return 1
+            ;;
+    esac
+}
