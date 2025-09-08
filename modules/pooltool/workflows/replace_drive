@@ -154,6 +154,23 @@ replace_workflow_upgrade() {
     echo "better drive with direct data copy."
     echo ""
     
+    # Check if we need to prompt for source drive selection
+    if [[ -z "$target_position" ]]; then
+        echo "🔍 SOURCE DRIVE SELECTION"
+        echo "─────────────────────────────────────────────────────────────────────"
+        echo "First, let's identify which drive you want to upgrade."
+        echo ""
+        
+        target_position=$(replace_prompt_source_drive_selection)
+        if [[ $? -ne 0 || -z "$target_position" ]]; then
+            echo "❌ No source drive selected"
+            return 1
+        fi
+        
+        echo "✅ Selected source drive at position $target_position"
+        echo ""
+    fi
+    
     # Pre-workflow step: Get target drive information before starting workflow
     echo "🔍 STEP 0: Upgrade Planning"
     echo "─────────────────────────────────────────────────────────────────────"
@@ -2558,4 +2575,109 @@ replace_rsync_progress_monitor() {
     done
     
     echo "✅ Rsync process completed"
+}
+
+#
+# Prompt user to select source drive when not specified on command line
+#
+replace_prompt_source_drive_selection() {
+    echo "💾 Available drives for upgrade:" >&2
+    echo "" >&2
+    
+    # Show drives with health evaluation to help user choose
+    echo "Getting drive information..." >&2
+    local drive_list
+    drive_list=$(cd /media/tRAID/local/src/pooltool && ./pooltool.sh health --evaluate --quiet 2>/dev/null)
+    
+    if [[ -n "$drive_list" ]]; then
+        echo "" >&2
+        echo "POSITION  DRIVE     SIZE       USAGE    RISK  RECOMMENDATION" >&2
+        echo "--------  --------  ---------  -------  ----  --------------------------------" >&2
+        echo "$drive_list" | head -10 >&2
+        echo "" >&2
+        echo "💡 Higher risk scores indicate better upgrade candidates" >&2
+    else
+        # Fallback to basic drive listing
+        echo "" >&2
+        cd /media/tRAID/local/src/pooltool && ./pooltool.sh drives 2>/dev/null | grep -E "^(DRU|PPU)[0-9]+" | head -10 >&2
+        echo "" >&2
+    fi
+    
+    echo "Selection options:" >&2
+    echo "  • Enter a position number (1-24)" >&2
+    echo "  • Enter a drive name (DRU01, PPU02, etc.)" >&2
+    echo "  • Type 'visual' to use the visual drive selector" >&2
+    echo "  • Type 'q' to quit" >&2
+    echo "" >&2
+    
+    while true; do
+        # Use stdin if available (for automation), otherwise use /dev/tty for interactive mode
+        if [ -t 0 ]; then
+            read -p "Select source drive to upgrade: " user_input </dev/tty
+        else
+            read -p "Select source drive to upgrade: " user_input
+        fi
+        
+        case "$user_input" in
+            "q"|"quit")
+                return 1
+                ;;
+            "visual")
+                echo "🎯 Opening visual drive selector..." >&2
+                echo "💡 Select your source drive from the visual layout" >&2
+                echo "" >&2
+                
+                # Call the visual drive selector
+                cd /media/tRAID/local/src/pooltool && ./pooltool.sh drives select >&2
+                local selector_exit_code=$?
+                
+                if [[ $selector_exit_code -eq 0 ]]; then
+                    echo "" >&2
+                    echo "✅ Drive selected from visual interface" >&2
+                    if [ -t 0 ]; then
+                        read -p "Enter the position number from your selection: " position_input </dev/tty
+                    else
+                        read -p "Enter the position number from your selection: " position_input
+                    fi
+                    if [[ "$position_input" =~ ^[1-9]$|^1[0-9]$|^2[0-4]$ ]]; then
+                        echo "$position_input"
+                        return 0
+                    else
+                        echo "❌ Invalid position. Please enter 1-24" >&2
+                        continue
+                    fi
+                else
+                    echo "❌ Visual selection cancelled" >&2
+                    continue
+                fi
+                ;;
+            [1-9]|1[0-9]|2[0-4])
+                # Valid position number
+                echo "$user_input"
+                return 0
+                ;;
+            DRU[0-9][0-9]|PPU[0-9][0-9])
+                # Drive name - convert to position
+                local position
+                position=$(cd /media/tRAID/local/src/pooltool && ./pooltool.sh drives 2>/dev/null | grep "^$user_input" | awk '{print $NF}' | grep -o '[0-9]\+')
+                if [[ -n "$position" ]]; then
+                    echo "$position"
+                    return 0
+                else
+                    echo "❌ Could not find position for drive $user_input" >&2
+                    continue
+                fi
+                ;;
+            "")
+                echo "Please enter a selection" >&2
+                ;;
+            *)
+                echo "❌ Invalid selection. Please enter:" >&2
+                echo "   • Position number (1-24)" >&2
+                echo "   • Drive name (DRU01, PPU02, etc.)" >&2 
+                echo "   • 'visual' for visual selector" >&2
+                echo "   • 'q' to quit" >&2
+                ;;
+        esac
+    done
 }
