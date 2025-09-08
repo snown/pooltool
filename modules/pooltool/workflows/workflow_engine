@@ -153,12 +153,12 @@ workflow_step() {
     
     # Update state file
     sed -i "s/current_step=.*/current_step=$step_number/" "$state_file"
-    echo "step_${step_number}_name=$step_name" >> "$state_file"
-    echo "step_${step_number}_status=$step_status" >> "$state_file"
-    echo "step_${step_number}_timestamp=$(date -Iseconds)" >> "$state_file"
+    echo "step_${step_number}_name=\"$step_name\"" >> "$state_file"
+    echo "step_${step_number}_status=\"$step_status\"" >> "$state_file"
+    echo "step_${step_number}_timestamp=\"$(date -Iseconds)\"" >> "$state_file"
     
     if [[ -n "$message" ]]; then
-        echo "step_${step_number}_message=$message" >> "$state_file"
+        echo "step_${step_number}_message=\"$message\"" >> "$state_file"
     fi
     
     # Log step update
@@ -181,9 +181,13 @@ workflow_step() {
             ;;
         "complete")
             echo "✅ Completed: $step_name (Step $step_number/$WORKFLOW_TOTAL_STEPS)" >&2
-            # Show progress bar after each completed step
-            local progress_percent=$((step_number * 100 / WORKFLOW_TOTAL_STEPS))
-            echo "   Progress: $progress_percent% [$(printf '%*s' $((step_number * 20 / WORKFLOW_TOTAL_STEPS)) '' | tr ' ' '▓')$(printf '%*s' $((20 - step_number * 20 / WORKFLOW_TOTAL_STEPS)) '' | tr ' ' '░')]" >&2
+            # Show progress bar after each completed step (only if total steps > 0)
+            if [[ "$WORKFLOW_TOTAL_STEPS" -gt 0 ]]; then
+                local progress_percent=$((step_number * 100 / WORKFLOW_TOTAL_STEPS))
+                echo "   Progress: $progress_percent% [$(printf '%*s' $((step_number * 20 / WORKFLOW_TOTAL_STEPS)) '' | tr ' ' '▓')$(printf '%*s' $((20 - step_number * 20 / WORKFLOW_TOTAL_STEPS)) '' | tr ' ' '░')]" >&2
+            else
+                echo "   Progress: Unable to calculate (total steps not set)" >&2
+            fi
             ;;
         "failed")
             echo "❌ Failed: $step_name (Step $step_number/$WORKFLOW_TOTAL_STEPS)" >&2
@@ -215,10 +219,10 @@ workflow_complete() {
     
     # Update state file
     sed -i "s/status=.*/status=$status/" "$state_file"
-    echo "completed=$(date -Iseconds)" >> "$state_file"
+    echo "completed=\"$(date -Iseconds)\"" >> "$state_file"
     
     if [[ -n "$message" ]]; then
-        echo "completion_message=$message" >> "$state_file"
+        echo "completion_message=\"$message\"" >> "$state_file"
     fi
     
     # Log completion
@@ -252,15 +256,19 @@ workflow_progress() {
     
     echo "Workflow Progress: Step $WORKFLOW_CURRENT_STEP/$WORKFLOW_TOTAL_STEPS"
     
-    # Create progress bar
-    local progress_width=40
-    local completed_steps=$((WORKFLOW_CURRENT_STEP * progress_width / WORKFLOW_TOTAL_STEPS))
-    local remaining_steps=$((progress_width - completed_steps))
-    
-    printf "["
-    printf "%*s" "$completed_steps" "" | tr ' ' '▓'
-    printf "%*s" "$remaining_steps" "" | tr ' ' '░'
-    printf "] %d%%\n" $((WORKFLOW_CURRENT_STEP * 100 / WORKFLOW_TOTAL_STEPS))
+    # Create progress bar (only if total steps > 0)
+    if [[ "$WORKFLOW_TOTAL_STEPS" -gt 0 ]]; then
+        local progress_width=40
+        local completed_steps=$((WORKFLOW_CURRENT_STEP * progress_width / WORKFLOW_TOTAL_STEPS))
+        local remaining_steps=$((progress_width - completed_steps))
+        
+        printf "["
+        printf "%*s" "$completed_steps" "" | tr ' ' '▓'
+        printf "%*s" "$remaining_steps" "" | tr ' ' '░'
+        printf "] %d%%\n" $((WORKFLOW_CURRENT_STEP * 100 / WORKFLOW_TOTAL_STEPS))
+    else
+        echo "Progress: Unable to calculate (total steps not set)"
+    fi
     
     return 0
 }

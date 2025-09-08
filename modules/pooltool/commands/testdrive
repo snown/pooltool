@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#NAMESPACE=pooltool::commands
+
+dependencies::register_module "pooltool/commands/testdrive"
+
+function testdrive::print_help {
+    echo "Test drive command - minimal implementation"
+}
+
+function testdrive {
+    echo "Test drive command working!"
+    this::testdrive::print_help
+}

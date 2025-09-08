@@ -16,6 +16,7 @@ bootstrap_load_module pooltool/commands/find
 bootstrap_load_module pooltool/commands/cp
 bootstrap_load_module pooltool/commands/mv
 bootstrap_load_module pooltool/commands/disk
+bootstrap_load_module pooltool/commands/drives
 bootstrap_load_module pooltool/commands/blink
 bootstrap_load_module pooltool/commands/drivemap
 bootstrap_load_module pooltool/commands/health
@@ -45,7 +46,8 @@ COMMANDS:
   cp          Copy files within the pool
   mv          Move files within the pool  
   disk        Manage and add new disks to the pool
-  devices     Show snapraid device information
+  drives      Unified drive information and management
+  devices     Show snapraid device information (deprecated - use 'drives')
   drivemap    Show visual drive bay layout
   overview    Show system overview with health and capacity summary
   select      Interactive drive selection interface
@@ -56,7 +58,11 @@ COMMANDS:
   workflow    Manage and monitor workflows
 
 EXAMPLES:
-  pooltool devices                    # Show all snapraid devices
+  pooltool drives                     # Show all drives in table format
+  pooltool drives --json              # Show drives in JSON format
+  pooltool drives available           # Show only available drives
+  pooltool drives select              # Interactive drive selection
+  pooltool devices                    # Show snapraid devices (deprecated)
   pooltool overview                   # Show system health and capacity overview
   pooltool select                     # Interactive drive selection interface
   pooltool health 5                   # Check health of drive at position 5
@@ -123,11 +129,26 @@ function main {
     fi
     ;;
   devices)
-    if command -v snapraid::devices &>/dev/null; then
+    # Legacy command - redirect to new drives command
+    echo "ℹ️  The 'devices' command has been replaced with 'drives'"
+    echo "   Use 'pooltool drives --help' for the new interface"
+    echo ""
+    
+    if command -v pooltool::commands::drives &>/dev/null; then
       shift
-      snapraid::devices "$@"
+      pooltool::commands::drives "$@"
     else
-      echo "'$1' command not currently supported"
+      echo "'drives' command not currently supported"
+      print_help
+      exit 1
+    fi
+    ;;
+  drives)
+    if command -v pooltool::commands::drives &>/dev/null; then
+      shift
+      pooltool::commands::drives "$@"
+    else
+      echo "'drives' command not currently supported"
       print_help
       exit 1
     fi
