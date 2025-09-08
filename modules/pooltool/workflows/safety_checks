@@ -472,27 +472,48 @@ safety_confirm_operation() {
     case "$risk_level" in
         "critical")
             confirm_text="I understand the risks and want to proceed"
+            echo "🚨 CRITICAL OPERATION - Enhanced confirmation required"
+            echo "Type exactly: '$confirm_text'"
             ;;
         *)
             confirm_text="yes"
+            echo "Type 'yes' to continue (or 'y'/'Y' for short)"
             ;;
     esac
     
-    if pooltool::question -p "Do you want to proceed? Type '$confirm_text' to continue" -d "no"; then
-        local user_input
-        user_input=$(bashful input -p "Confirmation: " -d "")
-        
-        if [[ "$user_input" == "$confirm_text" ]]; then
-            echo "✅ Operation confirmed by user"
-            return 0
-        else
-            echo "❌ Confirmation text did not match - operation cancelled"
-            return 1
-        fi
-    else
-        echo "❌ Operation cancelled by user"
-        return 1
-    fi
+    local user_input
+    user_input=$(bashful input -p "Confirmation: " -d "")
+    
+    # Normalize input for comparison
+    local normalized_input="${user_input,,}"  # Convert to lowercase
+    
+    case "$risk_level" in
+        "critical")
+            # Critical operations require exact text
+            if [[ "$user_input" == "$confirm_text" ]]; then
+                echo "✅ Operation confirmed by user"
+                return 0
+            else
+                echo "❌ Confirmation text did not match - operation cancelled"
+                echo "💡 Critical operations require exact confirmation text for safety"
+                return 1
+            fi
+            ;;
+        *)
+            # Standard operations accept reasonable variations
+            if [[ "$normalized_input" == "yes" || "$normalized_input" == "y" ]]; then
+                echo "✅ Operation confirmed by user"
+                return 0
+            elif [[ "$normalized_input" == "no" || "$normalized_input" == "n" ]]; then
+                echo "❌ Operation cancelled by user"
+                return 1
+            else
+                echo "❌ Invalid response '$user_input' - operation cancelled"
+                echo "💡 Please respond with 'yes'/'y' or 'no'/'n'"
+                return 1
+            fi
+            ;;
+    esac
 }
 
 # Initialize safety system when module loads

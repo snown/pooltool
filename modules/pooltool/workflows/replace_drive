@@ -1507,6 +1507,102 @@ replace_migration_automated_rsync() {
 }
 
 #
+# Upgrade-specific automated rsync (uses pre-selected device)
+#
+replace_upgrade_automated_rsync() {
+    local target_position="$1"
+    local source_path="$2"
+    local new_drive_device="$3"  # Pre-selected device, no prompting
+    local username="$(id -nu)"
+    local runid="$(uuidgen)"
+    
+    echo "🔄 Automated Rsync Copy Process"
+    echo "════════════════════════════════════════════════════════════════"
+    echo "Source: $source_path"
+    echo "Target: $new_drive_device (pre-selected)"
+    echo ""
+    
+    # Validate the pre-selected device
+    if [[ ! -b "$new_drive_device" ]]; then
+        echo "❌ $new_drive_device is not a valid block device"
+        echo "💡 The target drive may have been disconnected"
+        return 1
+    fi
+    
+    # Remove any partition numbers
+    new_drive_device="${new_drive_device%%[[:digit:]]}"
+    
+    echo "🛠️  Preparing new drive..."
+    echo "   Device: $new_drive_device"
+    echo ""
+    
+    # Format the new drive
+    echo "📁 Creating filesystem on $new_drive_device..."
+    
+    # Create a single partition taking the full disk
+    snown::sudo parted "$new_drive_device" --script mklabel gpt mkpart primary ext4 0% 100%
+    
+    # Wait for partition to appear
+    sleep 2
+    
+    # Format with ext4
+    local partition="${new_drive_device}1"
+    echo "🔄 Formatting ${partition} with ext4..."
+    snown::sudo mkfs.ext4 -F "$partition"
+    
+    # Create temporary mount point
+    local temp_mountpoint="/tmp/new_drive_${runid}"
+    snown::sudo mkdir -p "$temp_mountpoint"
+    
+    # Mount the new drive
+    echo "📎 Mounting ${partition} at $temp_mountpoint"
+    snown::sudo mount "$partition" "$temp_mountpoint"
+    
+    # Start rsync in background with screen
+    echo "🚀 Starting data copy in background..."
+    echo "   This may take several hours depending on data size"
+    echo ""
+    
+    # Create screen session for rsync
+    screen -dmS "replace_${runid}" bash -c "
+        echo 'Starting rsync copy operation...'
+        echo 'Source: $source_path'
+        echo 'Target: $temp_mountpoint'
+        echo ''
+        
+        sudo rsync -avH --progress --stats '$source_path/' '$temp_mountpoint/'
+        rsync_exit=\$?
+        
+        echo ''
+        if [[ \$rsync_exit -eq 0 ]]; then
+            echo '✅ Copy completed successfully!'
+        else
+            echo '❌ Copy failed with exit code: '\$rsync_exit
+        fi
+        
+        echo 'Press any key to close this session...'
+        read -n 1
+    "
+    
+    echo "✅ Background copy started with session: replace_${runid}"
+    echo ""
+    echo "📋 Monitor progress with:"
+    echo "   screen -r replace_${runid}  # Attach to copy session"
+    echo "   df -h $temp_mountpoint      # Check space usage"
+    echo "   ls -la $temp_mountpoint     # Check files being copied"
+    echo ""
+    echo "💡 The copy will continue in the background. You can safely close this terminal."
+    echo "   The wizard will check for completion when you proceed to the next step."
+    
+    # Store rsync session info globally
+    REPLACE_RSYNC_RUNID="$runid"
+    REPLACE_RSYNC_MOUNTPOINT="$temp_mountpoint"
+    REPLACE_NEW_DEVICE="${new_drive_device}1"
+    
+    return 0
+}
+
+#
 # New empty drive migration method
 #
 replace_migration_new_empty() {
@@ -1797,18 +1893,14 @@ replace_upgrade_step_data_copy() {
     echo "📦 Step 5: Data Copy Process"
     echo "─────────────────────────────────────────────────────────────────────"
     
-    # This will use the enhanced automated rsync from the migration functions
-    # but adapted for the upgrade workflow
-    
+    # For upgrade workflow, we already have the target device selected
     echo "🔄 Starting automated data copy from source to new drive..."
     echo "   Source: $REPLACE_TARGET_DEVICE"
     echo "   Target: $REPLACE_NEW_DEVICE"
     echo ""
     
-    # Call the automated rsync function with upgrade-specific parameters
-    local source_mountpoint=""
-    
     # Find source drive mount point
+    local source_mountpoint=""
     local snapraid_mountpoints=( $(snapraid::devices mountpoints) )
     local snapraid_names=( $(snapraid::devices names) )
     
@@ -1827,8 +1919,8 @@ replace_upgrade_step_data_copy() {
     
     echo "✅ Source mount point found: $source_mountpoint"
     
-    # Use the automated rsync function
-    replace_migration_automated_rsync "$REPLACE_TARGET_POSITION" "$source_mountpoint"
+    # Use upgrade-specific rsync with pre-selected device
+    replace_upgrade_automated_rsync "$REPLACE_TARGET_POSITION" "$source_mountpoint" "$REPLACE_NEW_DEVICE"
     return $?
 }
 
