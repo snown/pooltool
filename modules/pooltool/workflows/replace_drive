@@ -290,34 +290,19 @@ replace_workflow_upgrade() {
             echo "💡 Select your target drive from the visual layout"
             echo ""
             
-            # Call the visual drive selector
-            selected_result=$(pooltool::commands::drives select 2>/dev/null)
+            # Call the visual drive selector interactively
+            pooltool::commands::drives select
             local selector_exit_code=$?
             
-            if [[ $selector_exit_code -eq 0 && -n "$selected_result" ]]; then
-                # Parse the result - could be direct device path or UNALLOCATED format
-                if [[ "$selected_result" =~ ^UNALLOCATED: ]]; then
-                    echo "⚠️  You selected an unallocated drive: $selected_result"
-                    echo "💡 Unallocated drives can be used as upgrade targets"
-                    read -p "Continue with this unallocated drive? (yes/no) [yes]: " confirm </dev/tty
-                    confirm=${confirm:-yes}
-                    if [[ ! "$confirm" =~ ^[Yy] ]]; then
-                        echo "Selection cancelled"
-                        continue
-                    fi
-                    # For workflow purposes, we'll need to handle unallocated drives
-                    echo "📝 Note: Unallocated drive selected for upgrade target"
-                    user_input="UNALLOCATED_DRIVE"
-                elif [[ "$selected_result" =~ ^/dev/ ]]; then
-                    # Direct device path selected
-                    user_input="$selected_result"
-                    echo "✅ Selected device: $user_input"
+            if [[ $selector_exit_code -eq 0 ]]; then
+                echo ""
+                echo "✅ Drive selected from visual interface"
+                read -p "Enter the device path from your selection: " user_input </dev/tty
+                if [[ -n "$user_input" && "$user_input" != "q" ]]; then
+                    echo "✅ Using selected device: $user_input"
                 else
-                    # Parse other formats if needed
-                    echo "📝 Selected: $selected_result"
-                    # For now, let's just use the result as-is and let the downstream validation handle it
-                    user_input="$selected_result"
-                    echo "✅ Processing selection: $user_input"
+                    echo "❌ No device specified"
+                    continue
                 fi
             else
                 echo "❌ Visual selection cancelled or failed"
