@@ -639,7 +639,49 @@ UNALLOCATED:NEW-14T:5 → Successfully parsed and mapped
 - Uses same upgrade workflow once device path is determined
 
 #### 📋 **Priority 3: Complete 7-Step Workflow Validation**
-**Status**: 🎯 READY FOR TESTING - All prerequisites complete
+**Status**: 🔄 **MAJOR VALIDATION SUCCESS + UX IMPROVEMENTS APPLIED**
+
+### **Core Validation Results**:
+✅ **Step 1 (Source Drive Assessment)** - DRU13 identified correctly  
+✅ **Step 2 (New Drive Preparation)** - /dev/sdy validated  
+✅ **Step 3 (Capacity and Compatibility Check)** - passed  
+✅ **Step 4 (Safety Checks)** - comprehensive validation  
+✅ **Step 5 (Data Copy Process)** - enhanced rsync engaged with [F]oreground/[B]ackground/[C]ancel options  
+
+**Enhanced Features Confirmed**:
+- ✅ Dual-mode rsync execution working
+- ✅ Clean progress display with `--info=progress2`
+- ✅ Proper error handling on Ctrl+C interruption
+- ✅ User choice interface functioning correctly
+
+### **🎨 UX IMPROVEMENTS APPLIED** *(Added 2024-09-09)*
+
+**Issues Addressed**:
+1. **Inconsistent Option Selection Patterns**
+   - ✅ Added default options to all prompts: `[y/N] (default: N)`
+   - ✅ Standardized enter key requirement (removed single-character reads)
+   - ✅ Clear option instructions provided
+
+2. **Unclear Confirmation Prompts**
+   - ✅ Enhanced: `Ready to start the upgrade workflow? [y/N] (default: N):`
+   - ✅ Enhanced: `Continue with upgrade (this will ERASE the target drive)? [y/N] (default: N):`
+   - ✅ Enhanced: `Select mode [F/B/C] (default: F):`
+
+3. **Transfer Preparation Hang**
+   - ✅ Added detailed step-by-step progress:
+     ```
+     ⏳ Step 1/4: Creating partition table...
+     ⏳ Step 2/4: Waiting for partition to appear...
+     ⏳ Step 3/4: Formatting /dev/sdx1 with ext4...
+     ⏳ Step 4/4: Mounting /dev/sdx1 at /tmp/new_drive_xxx
+     ✅ Drive preparation completed!
+     ```
+
+**UX Patterns Standardized**:
+- `[y/N] (default: N)` - for yes/no confirmations
+- `[F/B/C] (default: F)` - for mode selection with default
+- `Step X/Y: [action]` - for progress indication
+- `✅ [completion message]` - for step completion
 
 **Prerequisites Complete:**
 - ✅ Enhanced rsync system (Priority 1) - Production ready

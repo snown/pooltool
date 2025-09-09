@@ -523,7 +523,7 @@ replace_workflow_upgrade() {
             echo "   Source: $source_size_human"
             echo "   Target: $(lsblk -no SIZE "$user_input" | head -1)"
             echo ""
-            read -p "Continue anyway? (NOT RECOMMENDED) [y/N]: " confirm
+            read -p "Continue anyway? (NOT RECOMMENDED) [y/N] (default: N): " confirm
             if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
                 continue
             fi
@@ -546,7 +546,7 @@ replace_workflow_upgrade() {
     echo "4. Keep the source drive as backup"
     echo ""
     
-    read -p "Ready to start the upgrade workflow? [y/N]: " confirm
+    read -p "Ready to start the upgrade workflow? [y/N] (default: N): " confirm
     if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
         echo "❌ Upgrade cancelled by user"
         return 1
@@ -1674,16 +1674,18 @@ replace_upgrade_automated_rsync() {
     
     # Format the new drive
     echo "📁 Creating filesystem on $new_drive_device..."
+    echo "   ⏳ Step 1/4: Creating partition table..."
     
     # Create a single partition taking the full disk
     snown::sudo parted "$new_drive_device" --script mklabel gpt mkpart primary ext4 0% 100%
     
     # Wait for partition to appear
+    echo "   ⏳ Step 2/4: Waiting for partition to appear..."
     sleep 2
     
     # Format with ext4
     local partition="${new_drive_device}1"
-    echo "🔄 Formatting ${partition} with ext4..."
+    echo "   ⏳ Step 3/4: Formatting ${partition} with ext4..."
     snown::sudo mkfs.ext4 -F "$partition"
     
     # Create temporary mount point
@@ -1691,8 +1693,11 @@ replace_upgrade_automated_rsync() {
     snown::sudo mkdir -p "$temp_mountpoint"
     
     # Mount the new drive
-    echo "📎 Mounting ${partition} at $temp_mountpoint"
+    echo "   ⏳ Step 4/4: Mounting ${partition} at $temp_mountpoint"
     snown::sudo mount "$partition" "$temp_mountpoint"
+    
+    echo "   ✅ Drive preparation completed!"
+    echo ""
     
     # Present user with execution mode choice
     echo "🚀 Data Copy Operation Setup"
@@ -1718,8 +1723,12 @@ replace_upgrade_automated_rsync() {
     echo ""
     
     while true; do
-        read -p "Select mode [F/B/C]: " -n 1 -r mode_choice
-        echo ""
+        read -p "Select mode [F/B/C] (default: F): " mode_choice
+        
+        # Handle empty input (default to F)
+        if [[ -z "$mode_choice" ]]; then
+            mode_choice="F"
+        fi
         
         case "$mode_choice" in
             [Ff])
@@ -1954,7 +1963,7 @@ replace_upgrade_step_new_drive_prep() {
         echo "🚨 WARNING: All data on the target drive will be destroyed!"
         echo ""
         
-        read -p "Continue with upgrade (this will ERASE the target drive)? [y/N]: " confirm
+        read -p "Continue with upgrade (this will ERASE the target drive)? [y/N] (default: N): " confirm
         if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
             echo "❌ Upgrade cancelled by user"
             return 1
