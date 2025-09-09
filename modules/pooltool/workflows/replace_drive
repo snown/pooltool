@@ -1558,41 +1558,67 @@ replace_upgrade_automated_rsync() {
     echo "📎 Mounting ${partition} at $temp_mountpoint"
     snown::sudo mount "$partition" "$temp_mountpoint"
     
-    # Start rsync in background with screen
-    echo "🚀 Starting data copy in background..."
+    # Present user with execution mode choice
+    echo "🚀 Data Copy Operation Setup"
+    echo "═══════════════════════════════════════════════════════════════"
+    echo "   Source: $source_path"
+    echo "   Target: $temp_mountpoint"
     echo "   This may take several hours depending on data size"
     echo ""
-    
-    # Create screen session for rsync
-    screen -dmS "replace_${runid}" bash -c "
-        echo 'Starting rsync copy operation...'
-        echo 'Source: $source_path'
-        echo 'Target: $temp_mountpoint'
-        echo ''
-        
-        sudo rsync -avH --progress --stats '$source_path/' '$temp_mountpoint/'
-        rsync_exit=\$?
-        
-        echo ''
-        if [[ \$rsync_exit -eq 0 ]]; then
-            echo '✅ Copy completed successfully!'
-        else
-            echo '❌ Copy failed with exit code: '\$rsync_exit
-        fi
-        
-        echo 'Press any key to close this session...'
-        read -n 1
-    "
-    
-    echo "✅ Background copy started with session: replace_${runid}"
+    echo "Choose execution mode:"
     echo ""
-    echo "📋 Monitor progress with:"
-    echo "   screen -r replace_${runid}  # Attach to copy session"
-    echo "   df -h $temp_mountpoint      # Check space usage"
-    echo "   ls -la $temp_mountpoint     # Check files being copied"
+    echo "📺 [F]oreground - Watch progress in real-time"
+    echo "   • Live progress updates and completion status"
+    echo "   • Terminal stays busy until completion"
+    echo "   • Good for local sessions and smaller transfers"
     echo ""
-    echo "💡 The copy will continue in the background. You can safely close this terminal."
-    echo "   The wizard will check for completion when you proceed to the next step."
+    echo "� [B]ackground - SSH-safe long-running transfer"
+    echo "   • Continues running if SSH disconnects"
+    echo "   • Can return to workflow anytime" 
+    echo "   • Perfect for remote sessions and large transfers"
+    echo "   • Monitor via: pooltool rsync status $runid"
+    echo ""
+    echo "❌ [C]ancel - Return to previous step"
+    echo ""
+    
+    while true; do
+        read -p "Select mode [F/B/C]: " -n 1 -r mode_choice
+        echo ""
+        
+        case "$mode_choice" in
+            [Ff])
+                echo "📺 Starting foreground transfer..."
+                echo ""
+                if replace_upgrade_rsync_foreground "$source_path" "$temp_mountpoint" "$runid"; then
+                    echo "✅ Foreground transfer completed successfully!"
+                    break
+                else
+                    echo "❌ Foreground transfer failed"
+                    return 1
+                fi
+                ;;
+            [Bb])
+                echo "🔄 Starting background transfer..."
+                echo ""
+                if replace_upgrade_rsync_background "$source_path" "$temp_mountpoint" "$runid"; then
+                    echo "✅ Background transfer initiated successfully!"
+                    echo "💡 Use 'pooltool rsync status $runid' to monitor progress"
+                    echo "💡 Return to this workflow anytime to continue"
+                    break
+                else
+                    echo "❌ Background transfer failed to start"
+                    return 1
+                fi
+                ;;
+            [Cc])
+                echo "🔙 Cancelled. Returning to previous step..."
+                return 1
+                ;;
+            *)
+                echo "❓ Please select F, B, or C"
+                ;;
+        esac
+    done
     
     # Store rsync session info globally
     REPLACE_RSYNC_RUNID="$runid"
@@ -2794,4 +2820,186 @@ replace_prompt_source_drive_selection() {
                 ;;
         esac
     done
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Enhanced Rsync Functions for SSH Persistence and Better UX
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Foreground rsync with clean progress bar (Issue #3 fix)
+replace_upgrade_rsync_foreground() {
+    local source_path="$1"
+    local temp_mountpoint="$2"
+    local runid="$3"
+    
+    local start_time=$(date +%s)
+    echo "⏰ Copy started at: $(date)"
+    echo ""
+    
+    # Run rsync with clean progress bar (not file-by-file)
+    echo "📦 Starting file transfer with progress monitoring..."
+    if snown::sudo rsync -ah --info=progress2 --no-i-r "$source_path/" "$temp_mountpoint/"; then
+        local end_time=$(date +%s)
+        local duration=$((end_time - start_time))
+        local duration_human=$(date -u -d @$duration +"%-Hh %-Mm %-Ss")
+        
+        echo ""
+        echo "✅ Copy completed successfully!"
+        echo "⏰ Duration: $duration_human" 
+        echo "📊 Final size: $(du -sh "$temp_mountpoint" | cut -f1)"
+        echo ""
+        
+        # Store completion info for workflow
+        echo "rsync_success=true" > "/tmp/pooltool_rsync_${runid}.status"
+        echo "rsync_duration=$duration_human" >> "/tmp/pooltool_rsync_${runid}.status"
+        echo "rsync_size=$(du -sh "$temp_mountpoint" | cut -f1)" >> "/tmp/pooltool_rsync_${runid}.status"
+        
+        # Store rsync session info globally  
+        REPLACE_RSYNC_RUNID="$runid"
+        REPLACE_RSYNC_MOUNTPOINT="$temp_mountpoint"
+        
+        return 0
+    else
+        local rsync_exit=$?
+        echo ""
+        echo "❌ Copy failed with exit code: $rsync_exit"
+        
+        case $rsync_exit in
+            1)  echo "💡 Syntax or usage error" ;;
+            2)  echo "💡 Protocol incompatibility" ;;
+            3)  echo "💡 Errors selecting input/output files" ;;
+            5)  echo "💡 Error starting client-server protocol" ;;
+            11) echo "💡 Error in file I/O - check disk space" ;;
+            20) echo "💡 Interrupted by signal (Ctrl+C)" ;;
+            23) echo "💡 Partial transfer due to error" ;;
+            *)  echo "💡 See rsync man page for exit code meanings" ;;
+        esac
+        
+        echo "rsync_success=false" > "/tmp/pooltool_rsync_${runid}.status"
+        echo "rsync_exit_code=$rsync_exit" >> "/tmp/pooltool_rsync_${runid}.status"
+        return 1
+    fi
+}
+
+# Background rsync with SSH persistence (Issue #1 & #2 fix)
+replace_upgrade_rsync_background() {
+    local source_path="$1"
+    local temp_mountpoint="$2"
+    local runid="$3"
+    
+    # Create workflow state for persistence
+    local workflow_id=$(workflow_engine::get_current_workflow_id)
+    local state_dir="/tmp/pooltool_workflow_${workflow_id}"
+    mkdir -p "$state_dir"
+    
+    local rsync_log="$state_dir/rsync_progress.log"
+    local rsync_pid_file="$state_dir/rsync.pid"
+    local mount_info="$state_dir/mount_info"
+    local status_file="$state_dir/rsync_status"
+    
+    # Save mount and state info for resumption
+    echo "source_path=$source_path" > "$mount_info"
+    echo "temp_mountpoint=$temp_mountpoint" >> "$mount_info"
+    echo "runid=$runid" >> "$mount_info"
+    echo "started_at=$(date)" >> "$mount_info"
+    
+    # Create background rsync script with progress monitoring
+    cat > "$state_dir/rsync_wrapper.sh" << 'EOF'
+#!/bin/bash
+source_path="$1"
+temp_mountpoint="$2"
+log_file="$3"
+pid_file="$4"
+status_file="$5"
+
+# Record our PID
+echo $$ > "$pid_file"
+echo "running" > "$status_file"
+
+# Function to handle cleanup on exit
+cleanup() {
+    echo "stopping" > "$status_file"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Background rsync process stopping" >> "$log_file"
+}
+trap cleanup EXIT
+
+# Run rsync with progress logging
+echo "$(date '+%Y-%m-%d %H:%M:%S') Starting background rsync copy" >> "$log_file"
+echo "$(date '+%Y-%m-%d %H:%M:%S') Source: $source_path" >> "$log_file"
+echo "$(date '+%Y-%m-%d %H:%M:%S') Target: $temp_mountpoint" >> "$log_file"
+
+if rsync -ah --info=progress2 --no-i-r "$source_path/" "$temp_mountpoint/" 2>&1 | \
+    while IFS= read -r line; do
+        echo "$(date '+%Y-%m-%d %H:%M:%S') $line" >> "$log_file"
+        # Also track overall progress
+        if [[ "$line" =~ ([0-9,]+)\ +([0-9]+%)\ +([0-9.]+[A-Za-z]+/s) ]]; then
+            echo "progress_bytes=${BASH_REMATCH[1]}" > "${status_file}.progress"
+            echo "progress_percent=${BASH_REMATCH[2]}" >> "${status_file}.progress"
+            echo "progress_speed=${BASH_REMATCH[3]}" >> "${status_file}.progress"
+            echo "last_update=$(date +%s)" >> "${status_file}.progress"
+        fi
+    done; then
+    echo "completed" > "$status_file"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Copy completed successfully" >> "$log_file"
+    exit 0
+else
+    local exit_code=$?
+    echo "failed" > "$status_file"
+    echo "exit_code=$exit_code" >> "$status_file"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') Copy failed with exit code $exit_code" >> "$log_file"
+    exit $exit_code
+fi
+EOF
+    
+    chmod +x "$state_dir/rsync_wrapper.sh"
+    
+    echo "🚀 Starting background data copy..."
+    echo "📝 Progress log: $rsync_log"
+    echo "🆔 Workflow ID: $workflow_id"
+    echo ""
+    
+    # Start background process
+    nohup "$state_dir/rsync_wrapper.sh" "$source_path" "$temp_mountpoint" "$rsync_log" "$rsync_pid_file" "$status_file" > /dev/null 2>&1 &
+    local wrapper_pid=$!
+    
+    # Wait a moment to ensure it started
+    sleep 3
+    if ! kill -0 "$wrapper_pid" 2>/dev/null; then
+        echo "❌ Failed to start background rsync process"
+        return 1
+    fi
+    
+    echo "✅ Background transfer started successfully"
+    echo ""
+    echo "📋 IMPORTANT: Background Process Management"
+    echo "─────────────────────────────────────────────────────────────────"
+    echo "The data copy is now running in the background."
+    echo "You can safely disconnect from SSH."
+    echo ""
+    echo "📊 To monitor progress:"
+    echo "   pooltool workflow progress $workflow_id"
+    echo "   tail -f $rsync_log"
+    echo ""
+    echo "🔄 To resume this workflow later:"
+    echo "   pooltool workflow resume $workflow_id"
+    echo ""
+    echo "⚠️  WORKFLOW WILL PAUSE after copy completes"
+    echo "    You must resume to continue with drive swap"
+    echo ""
+    
+    # Set workflow state for resumption  
+    workflow_engine::set_step_state "data_copy" "background_running"
+    workflow_engine::save_state "rsync_mode" "background"
+    workflow_engine::save_state "rsync_log" "$rsync_log"
+    workflow_engine::save_state "rsync_pid_file" "$rsync_pid_file"
+    workflow_engine::save_state "mount_info_file" "$mount_info"
+    workflow_engine::save_state "status_file" "$status_file"
+    workflow_engine::save_state "state_dir" "$state_dir"
+    
+    # Store rsync session info globally for immediate workflow context
+    REPLACE_RSYNC_RUNID="$runid"
+    REPLACE_RSYNC_MOUNTPOINT="$temp_mountpoint"
+    
+    # Return special code to indicate background mode
+    return 3  # Special return code for "background_started"
 }
