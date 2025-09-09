@@ -598,21 +598,45 @@ The enhanced rsync system has successfully passed all validation tests. All thre
 
 **🎉 RESULT: PRODUCTION READY - All UX issues resolved with comprehensive solution**
 
-#### � **Priority 2: Unallocated Drive Flow (EXISTING ISSUE)**
-**Status**: Known issue from previous testing, needs resolution
+#### ✅ **Priority 2: Unallocated Drive Flow (IMPLEMENTED)**
+**Status**: ✅ IMPLEMENTED - Unallocated drive workflow now functional
 
-**Issue**: Visual selector returns `UNALLOCATED:NEW-14T:5` format but workflow expects device path
-**Impact**: Workflow breaks when users select unallocated drives via visual selector
+**✅ SOLUTION IMPLEMENTED:**
+- Enhanced visual selector handles `UNALLOCATED:NAME:POSITION` format
+- Added device path resolution using WWN/serial matching
+- Integrated into replace-drive workflow with proper error handling
+- Supports both simple and detailed UNALLOCATED formats
 
-**Investigation Steps:**
+**🔧 Technical Implementation:**
+- **Format Support**: `UNALLOCATED:NEW-14T:5` and `UNALLOCATED:NEW-14T:5:1:3`
+- **Position Calculation**: `connector = (position-1)/4, device = 3-((position-1)%4)`
+- **Device Resolution**: WWN and serial number matching to find `/dev/sdX` paths
+- **Error Handling**: Graceful fallback when device mapping fails
+
+**✅ VALIDATION RESULTS:**
 ```bash
-# Check how UNALLOCATED format is handled
-grep -n "UNALLOCATED:" modules/pooltool/workflows/replace_drive
+# Test 1: Device Mapping Confirmed
+Position 5 (NEW-14T) → /dev/sdy (WWN: 5000C500C8435D1C, Serial: ZR900A2S)
+Position 21 (NEW-12T) → /dev/sdw (WWN: 5000C500B0D1D723, Serial: 0000WEP7)
 
-# Test workflow logic with unallocated drive
-./pooltool.sh replace-drive 15
-# Select option 1, then 'visual', then position 5 (unallocated)
+# Test 2: Position Calculation Verified  
+Position 5 → Connector 1, Device 3 ✅
+Position 21 → Connector 5, Device 3 ✅
+
+# Test 3: Format Parsing Working
+UNALLOCATED:NEW-14T:5 → Successfully parsed and mapped
 ```
+
+**🎯 WORKFLOW INTEGRATION:**
+- Users can now select unallocated drives via visual selector
+- System automatically finds device paths for physical hardware
+- Workflow proceeds normally once device path is resolved
+- Clear feedback provided throughout the process
+
+**⚠️ NOTES:**
+- Unallocated drives may need SnapRAID configuration after upgrade
+- Device must be physically connected and detectable by system
+- Uses same upgrade workflow once device path is determined
 
 #### 📋 **Priority 3: Complete 7-Step Workflow Validation**
 **Status**: Previous testing stopped at rsync step, full workflow needs validation

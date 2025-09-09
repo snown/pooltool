@@ -349,15 +349,151 @@ replace_workflow_upgrade() {
         # Handle unallocated drive selection from visual selector
         if [[ "$user_input" =~ ^UNALLOCATED: ]]; then
             echo "💡 Processing unallocated drive selection: $user_input"
-            # Extract components: UNALLOCATED:NAME:POSITION
-            local drive_name=$(echo "$user_input" | cut -d: -f2)
-            local drive_position=$(echo "$user_input" | cut -d: -f3)
+            echo ""
             
-            echo "🔄 Unallocated drive workflow not yet implemented"
+            # Enhanced parsing for different UNALLOCATED formats:
+            # Format 1: UNALLOCATED:NAME:POSITION (from simple visual selector)
+            # Format 2: UNALLOCATED:NAME:POSITION:CONNECTOR:DEVICE_SLOT (from detailed arcconf detection)
+            local drive_name drive_position drive_connector drive_device_slot
+            
+            if [[ "$user_input" =~ ^UNALLOCATED:([^:]+):([0-9]+):([0-9]+):([0-9]+)$ ]]; then
+                # Format 2: Detailed format with connector/device_slot
+                drive_name="${BASH_REMATCH[1]}"
+                drive_position="${BASH_REMATCH[2]}"
+                drive_connector="${BASH_REMATCH[3]}"
+                drive_device_slot="${BASH_REMATCH[4]}"
+                echo "🔍 Detailed unallocated drive info detected"
+            elif [[ "$user_input" =~ ^UNALLOCATED:([^:]+):([0-9]+)$ ]]; then
+                # Format 1: Simple format, need to calculate connector/device_slot
+                drive_name="${BASH_REMATCH[1]}"
+                drive_position="${BASH_REMATCH[2]}"
+                # Calculate connector and device_slot from position
+                drive_connector=$(( (drive_position - 1) / 4 ))
+                drive_device_slot=$(( 3 - ((drive_position - 1) % 4) ))
+                echo "🔍 Simple unallocated drive format, calculated position"
+            else
+                echo "❌ Invalid unallocated drive format: $user_input"
+                continue
+            fi
+            
             echo "   Drive: $drive_name at position $drive_position"
-            echo "   This feature requires drive allocation logic"
-            echo "❌ Please select an allocated drive for now"
-            continue
+            echo "   Physical: Connector $drive_connector, Device $drive_device_slot"
+            echo ""
+            
+            # Find the system device path for this unallocated drive
+            echo "🔍 Finding system device path for unallocated drive..."
+            
+            # Load driveutils module to access unified mapping
+            bootstrap_load_module pooltool/driveutils >/dev/null 2>&1
+            
+            # Get unified mapping data 
+            local unified_data
+            if ! unified_data=$(pooltool::create_unified_mapping 1 2>/dev/null); then
+                echo "❌ Failed to get drive mapping data"
+                echo "� Cannot determine device path for unallocated drive"
+                continue
+            fi
+            
+            # Look for unallocated drive in unified mapping by connector/device_slot
+            local found_device_path=""
+            local found_wwn=""
+            local found_serial=""
+            local found_model=""
+            
+            while IFS= read -r record; do
+                if [[ -n "$record" ]]; then
+                    # Parse unified record format: mount_name:arcconf_id:connector:device_slot:snapraid_name:device_path:wwn:serial:channel:device_num:model:size:status
+                    if [[ "$record" =~ ^([^:]+):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*):([^:]*)$ ]]; then
+                        local rec_connector="${BASH_REMATCH[3]}"
+                        local rec_device_slot="${BASH_REMATCH[4]}"
+                        local rec_device_path="${BASH_REMATCH[6]}"
+                        local rec_wwn="${BASH_REMATCH[7]}"
+                        local rec_serial="${BASH_REMATCH[8]}"
+                        local rec_model="${BASH_REMATCH[11]}"
+                        local rec_status="${BASH_REMATCH[13]}"
+                        
+                        # Check if this matches our target connector/device_slot
+                        if [[ "$rec_connector" == "$drive_connector" && "$rec_device_slot" == "$drive_device_slot" ]]; then
+                            # Found the drive record!
+                            found_wwn="$rec_wwn"
+                            found_serial="$rec_serial"
+                            found_model="$rec_model"
+                            
+                            if [[ -n "$rec_device_path" && "$rec_device_path" != "NONE" ]]; then
+                                # This drive already has a device path (shouldn't happen for unallocated)
+                                found_device_path="$rec_device_path"
+                                echo "⚠️  Drive appears to already be allocated: $rec_device_path"
+                            else
+                                echo "✅ Found unallocated drive record"
+                                echo "   WWN: ${found_wwn:-Unknown}"
+                                echo "   Serial: ${found_serial:-Unknown}"
+                                echo "   Model: ${found_model:-Unknown}"
+                            fi
+                            break
+                        fi
+                    fi
+                fi
+            done <<< "$unified_data"
+            
+            # If we found WWN or serial, try to find the actual device path
+            if [[ -z "$found_device_path" && ( -n "$found_wwn" || -n "$found_serial" ) ]]; then
+                echo ""
+                echo "🔍 Searching for system device path..."
+                
+                # Search all /dev/sd* devices for matching WWN or serial
+                for device in /dev/sd*; do
+                    # Skip partition numbers (only check whole devices)
+                    if [[ "$device" =~ [0-9]$ ]]; then
+                        continue
+                    fi
+                    
+                    if [[ -b "$device" ]]; then
+                        # Get device WWN and serial
+                        local dev_wwn dev_serial
+                        dev_wwn=$(lsblk -n -o WWN "$device" 2>/dev/null | head -1 | tr -d ' ' || echo "")
+                        dev_serial=$(lsblk -n -o SERIAL "$device" 2>/dev/null | head -1 | tr -d ' ' || echo "")
+                        
+                        # Normalize WWN format for comparison
+                        if [[ "$dev_wwn" =~ ^0x([A-F0-9]+)$ ]]; then
+                            dev_wwn="${BASH_REMATCH[1]^^}"  # Remove 0x and convert to uppercase
+                        elif [[ -n "$dev_wwn" ]]; then
+                            dev_wwn="${dev_wwn^^}"  # Convert to uppercase
+                        fi
+                        
+                        # Check if WWN matches
+                        if [[ -n "$found_wwn" && -n "$dev_wwn" && "$found_wwn" == "$dev_wwn" ]]; then
+                            found_device_path="$device"
+                            echo "✅ Found device by WWN match: $device"
+                            break
+                        # Check if serial matches  
+                        elif [[ -n "$found_serial" && -n "$dev_serial" && "$found_serial" == "$dev_serial" ]]; then
+                            found_device_path="$device"
+                            echo "✅ Found device by serial match: $device"
+                            break
+                        fi
+                    fi
+                done
+            fi
+            
+            if [[ -z "$found_device_path" ]]; then
+                echo "❌ Could not find system device path for unallocated drive"
+                echo "💡 The drive may need to be physically connected or initialized"
+                echo "💡 Please check hardware connections and try again"
+                continue
+            fi
+            
+            echo "🎯 Unallocated drive successfully mapped!"
+            echo "   Position: $drive_position ($drive_name)"
+            echo "   Device: $found_device_path"
+            echo "   Model: ${found_model:-Unknown}"
+            echo ""
+            echo "💡 This drive will be treated as a regular target device"
+            echo "⚠️  Note: Drive may need SnapRAID configuration after the upgrade"
+            echo ""
+            
+            # Use the found device path as the regular user input
+            user_input="$found_device_path"
+            echo "🔄 Continuing with device: $user_input"
         fi
         
         # Validate input (for regular device paths)
